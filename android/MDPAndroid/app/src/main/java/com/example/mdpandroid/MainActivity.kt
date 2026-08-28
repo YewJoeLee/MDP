@@ -51,6 +51,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Tab
+import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -60,6 +62,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -78,8 +81,8 @@ import androidx.compose.ui.unit.sp
 import com.example.mdpandroid.ui.theme.MDPAndroidTheme
 import kotlin.math.floor
 
-internal const val MAP_COLUMNS = 13
-internal const val MAP_ROWS = 14
+internal const val MAP_COLUMNS = 20
+internal const val MAP_ROWS = 20
 
 class MainActivity : ComponentActivity() {
     private lateinit var bluetoothController: BluetoothController
@@ -125,6 +128,7 @@ private fun ARCMApp(
     val state = controller.state
     var showDevices by remember { mutableStateOf(false) }
     var demoMode by remember { mutableStateOf(false) }
+    var selectedTab by rememberSaveable { mutableStateOf(0) }
 
     DisposableEffect(controller) {
         controller.refreshDevices()
@@ -133,38 +137,43 @@ private fun ARCMApp(
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text("MDP Remote Controller", fontWeight = FontWeight.Bold)
-                        Text("Android Remote Controller Module", fontSize = 11.sp)
+            Column {
+                TopAppBar(
+                    title = {
+                        Column {
+                            Text("MDP Remote Controller", fontWeight = FontWeight.Bold)
+                            Text("Android Remote Controller Module", fontSize = 11.sp)
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer
+                    ),
+                    actions = {
+                        Icon(
+                            imageVector = if (state.connected) Icons.Default.Bluetooth else Icons.Default.BluetoothDisabled,
+                            contentDescription = null,
+                            tint = if (state.connected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(end = 16.dp)
+                        )
                     }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer
-                ),
-                actions = {
-                    Icon(
-                        imageVector = if (state.connected) Icons.Default.Bluetooth else Icons.Default.BluetoothDisabled,
-                        contentDescription = null,
-                        tint = if (state.connected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(end = 16.dp)
-                    )
+                )
+                PrimaryTabRow(selectedTabIndex = selectedTab) {
+                    AppTab.entries.forEachIndexed { index, tab ->
+                        Tab(
+                            selected = selectedTab == index,
+                            onClick = { selectedTab = index },
+                            text = { Text(tab.title) }
+                        )
+                    }
                 }
-            )
+            }
         }
     ) { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .verticalScroll(rememberScrollState())
-                .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            ConnectionCard(
+        when (AppTab.entries[selectedTab]) {
+            AppTab.CONTROL -> ControlScreen(
                 state = state,
                 demoMode = demoMode,
+                requestBluetoothPermissions = requestBluetoothPermissions,
                 onDemoModeChange = { demoMode = it },
                 onScan = {
                     if (demoMode) controller.addStatus("Demo mode: Bluetooth scan skipped")
@@ -176,28 +185,28 @@ private fun ARCMApp(
                 },
                 onConnect = controller::connect,
                 onDisconnect = controller::disconnect,
-                onSelectDevice = { showDevices = true }
-            )
-
-            ControlCard(
-                enabled = demoMode || state.connected,
+                onSelectDevice = { showDevices = true },
                 onCommand = { command ->
                     controller.send(command)
                     if (demoMode) controller.addStatus("Demo command: $command")
-                }
+                },
+                padding = padding
             )
-
-            ArenaCard(
-                state = state,
-                onAddObstacle = controller::addObstacleAt,
-                onMoveObstacle = controller::moveObstacle,
-                onRemoveObstacle = controller::removeObstacle,
-                onSelectObstacle = controller::selectObstacle,
-                onSetFace = controller::setObstacleFace,
-                onClearTarget = controller::clearObstacleTarget
-            )
-
-            StatusCard(state.statusMessages)
+            AppTab.ARENA -> ScreenColumn(padding) {
+                ArenaCard(
+                    state = state,
+                    onAddObstacle = controller::addObstacleAt,
+                    onMoveObstacle = controller::moveObstacle,
+                    onRemoveObstacle = controller::removeObstacle,
+                    onSelectObstacle = controller::selectObstacle,
+                    onSetFace = controller::setObstacleFace,
+                    onClearTarget = controller::clearObstacleTarget
+                )
+            }
+            AppTab.STATUS -> ScreenColumn(padding) {
+                StatusCard(state.statusMessages)
+                AssessmentStatusCard(state)
+            }
         }
     }
 
@@ -220,6 +229,74 @@ private fun ARCMApp(
             },
             deviceName = controller::deviceName
         )
+    }
+}
+
+private enum class AppTab(val title: String) {
+    CONTROL("Control"),
+    ARENA("Arena"),
+    STATUS("Status")
+}
+
+@Composable
+private fun ControlScreen(
+    state: AppState,
+    demoMode: Boolean,
+    requestBluetoothPermissions: () -> Unit,
+    onDemoModeChange: (Boolean) -> Unit,
+    onScan: () -> Unit,
+    onConnect: (BluetoothDeviceInfo) -> Unit,
+    onDisconnect: () -> Unit,
+    onSelectDevice: () -> Unit,
+    onCommand: (String) -> Unit,
+    padding: PaddingValues
+) {
+    ScreenColumn(padding) {
+        ConnectionCard(
+            state = state,
+            demoMode = demoMode,
+            onDemoModeChange = onDemoModeChange,
+            onScan = onScan,
+            onConnect = onConnect,
+            onDisconnect = onDisconnect,
+            onSelectDevice = onSelectDevice
+        )
+        ControlCard(enabled = demoMode || state.connected, onCommand = onCommand)
+        StatusCard(state.statusMessages)
+    }
+}
+
+@Composable
+private fun ScreenColumn(padding: PaddingValues, content: @Composable () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(padding)
+            .verticalScroll(rememberScrollState())
+        .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        content()
+    }
+}
+
+@Composable
+private fun AssessmentStatusCard(state: AppState) {
+    Card {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Assessment readiness", fontWeight = FontWeight.Bold)
+            Text("Task 1  •  Automatic movement and image recognition", style = MaterialTheme.typography.bodyMedium)
+            Text("Monitor MSG, TARGET, and ROBOT updates during the run.", style = MaterialTheme.typography.bodySmall)
+            HorizontalDivider()
+            Text("Task 2  •  Fastest car using visual recognition", style = MaterialTheme.typography.bodyMedium)
+            Text("Use STOP for emergency/manual testing and monitor robot status.", style = MaterialTheme.typography.bodySmall)
+            Text(
+                if (state.connected) "Bluetooth link ready for live integration." else "Connect Bluetooth before live assessment.",
+                color = if (state.connected) Color(0xFF197A43) else MaterialTheme.colorScheme.error,
+                fontWeight = FontWeight.SemiBold,
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
     }
 }
 
@@ -336,7 +413,7 @@ private fun ArenaCard(
                 modifier = Modifier.fillMaxWidth()
             )
             Text(
-                "Coordinates: x 0-$MAP_COLUMNS, y 0-$MAP_ROWS. Drag an obstacle outside the arena to remove it.",
+                "Coordinates: x 0-${MAP_COLUMNS - 1}, y 0-${MAP_ROWS - 1}. Drag an obstacle outside the arena to remove it.",
                 style = MaterialTheme.typography.bodySmall
             )
             if (selected != null) {
