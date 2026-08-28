@@ -34,11 +34,7 @@ import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.BluetoothDisabled
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowLeft
-import androidx.compose.material.icons.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -212,6 +208,7 @@ private fun ARCMApp(
             }
             AppTab.MANUAL -> ScreenColumn(padding) {
                 ControlCard(enabled = demoMode || state.connected, onCommand = onCommand)
+                AmdToolCommandCard(enabled = demoMode || state.connected, onCommand = onCommand)
                 StatusCard(state.statusMessages)
                 AssessmentStatusCard(state)
             }
@@ -270,7 +267,7 @@ private fun AssessmentStatusCard(state: AppState) {
             Text("Monitor MSG, TARGET, and ROBOT updates during the run.", style = MaterialTheme.typography.bodySmall)
             HorizontalDivider()
             Text("Task 2  •  Fastest car using visual recognition", style = MaterialTheme.typography.bodyMedium)
-            Text("Use STOP for emergency/manual testing and monitor robot status.", style = MaterialTheme.typography.bodySmall)
+            Text("Use Begin Fastest Path when the team agrees on the run-control protocol.", style = MaterialTheme.typography.bodySmall)
             Text(
                 if (state.connected) "Bluetooth link ready for live integration." else "Connect Bluetooth before live assessment.",
                 color = if (state.connected) Color(0xFF197A43) else MaterialTheme.colorScheme.error,
@@ -369,26 +366,49 @@ private fun ControlCard(enabled: Boolean, onCommand: (String) -> Unit) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("Robot controls", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                Text("Drive controls", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                 Text(if (enabled) "Ready" else "Connect or enable demo mode", style = MaterialTheme.typography.bodySmall)
             }
+            Text(
+                "AMDTOOL commands: f, r, tl, tr. The map updates from ROBOT messages.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
             Spacer(Modifier.height(8.dp))
-            IconButton(onClick = { onCommand("f") }, enabled = enabled, modifier = Modifier.size(52.dp)) {
-                Icon(Icons.Default.KeyboardArrowUp, contentDescription = "Forward", modifier = Modifier.size(36.dp))
+            Button(onClick = { onCommand("f") }, enabled = enabled) {
+                Text("Forward")
             }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = { onCommand("tl") }, enabled = enabled, modifier = Modifier.size(52.dp)) {
-                    Icon(Icons.Default.KeyboardArrowLeft, contentDescription = "Left", modifier = Modifier.size(36.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedButton(onClick = { onCommand("tl") }, enabled = enabled) { Text("Turn left") }
+                OutlinedButton(onClick = { onCommand("tr") }, enabled = enabled) { Text("Turn right") }
+            }
+            Button(onClick = { onCommand("r") }, enabled = enabled) {
+                Text("Reverse")
+            }
+        }
+    }
+}
+
+@Composable
+private fun AmdToolCommandCard(enabled: Boolean, onCommand: (String) -> Unit) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("AMDTOOL task commands", fontWeight = FontWeight.Bold)
+            Text(
+                "These exact tokens match the AMDTOOL Settings > Received Commands screen.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                Button(onClick = { onCommand("beginExplore") }, enabled = enabled, modifier = Modifier.weight(1f)) {
+                    Text("Begin exploration")
                 }
-                Button(onClick = { onCommand("STOP") }, enabled = enabled, modifier = Modifier.size(76.dp, 48.dp), contentPadding = PaddingValues(0.dp)) {
-                    Icon(Icons.Default.Stop, contentDescription = "Stop")
-                }
-                IconButton(onClick = { onCommand("tr") }, enabled = enabled, modifier = Modifier.size(52.dp)) {
-                    Icon(Icons.Default.KeyboardArrowRight, contentDescription = "Right", modifier = Modifier.size(36.dp))
+                Button(onClick = { onCommand("beginFastest") }, enabled = enabled, modifier = Modifier.weight(1f)) {
+                    Text("Begin fastest path")
                 }
             }
-            IconButton(onClick = { onCommand("r") }, enabled = enabled, modifier = Modifier.size(52.dp)) {
-                Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Backward", modifier = Modifier.size(36.dp))
+            OutlinedButton(onClick = { onCommand("sendArena") }, enabled = enabled, modifier = Modifier.align(Alignment.CenterHorizontally)) {
+                Text("Send arena info")
             }
         }
     }

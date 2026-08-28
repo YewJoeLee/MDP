@@ -263,34 +263,20 @@ class BluetoothController(private val context: Context) {
     }
 
     /**
-     * Moves the on-screen robot marker immediately so the map reflects a control tap without
-     * waiting for the robot to echo back a `ROBOT` update, then sends the same command over
-     * Bluetooth. A later `ROBOT` message from the device still overwrites this local guess.
-     *
-     * Command strings match the AMD Tool's default Settings -> Received Commands mapping
-     * (f/r/tl/tr) so the tool recognises them and reflects the move in its own Command Log
-     * without needing to be reconfigured first.
+     * Sends one of the AMDTOOL's configured movement commands. The arena changes only when a
+     * `ROBOT,...` update is received, so tapping Turn Left/Right never fakes a 90-degree turn on
+     * the Android map when the physical robot makes a gradual turn.
      */
     fun moveRobot(command: String) {
-        val robot = state.robot
-        val updated = when (command) {
-            "f" -> robot.copy(
-                x = (robot.x + robot.direction.dx).coerceIn(0, MAP_COLUMNS - 1),
-                y = (robot.y + robot.direction.dy).coerceIn(0, MAP_ROWS - 1)
-            )
-            "r" -> robot.copy(
-                x = (robot.x - robot.direction.dx).coerceIn(0, MAP_COLUMNS - 1),
-                y = (robot.y - robot.direction.dy).coerceIn(0, MAP_ROWS - 1)
-            )
-            "tl" -> robot.copy(direction = robot.direction.turnLeft())
-            "tr" -> robot.copy(direction = robot.direction.turnRight())
-            else -> null
-        }
-        if (updated != null) state = state.copy(robot = updated)
         send(command)
     }
 
-    fun send(command: String) {
+    /**
+     * AMDTOOL compares received command text against its configured command token. Keep the
+     * payload exact by default; callers that need a line-based robot protocol can opt in to a
+     * terminator explicitly.
+     */
+    fun send(command: String, appendLineTerminator: Boolean = false) {
         val currentOutput = output
         if (!state.connected || currentOutput == null) {
             addStatus("Not connected; command not sent: $command")
@@ -298,7 +284,8 @@ class BluetoothController(private val context: Context) {
         }
         writeExecutor.execute {
             try {
-                currentOutput.write((command.trim() + "\n").toByteArray(Charsets.UTF_8))
+                val payload = command.trim() + if (appendLineTerminator) "\n" else ""
+                currentOutput.write(payload.toByteArray(Charsets.UTF_8))
                 currentOutput.flush()
                 mainHandler.post { addStatus("Sent: $command") }
             } catch (_: IOException) {
@@ -423,7 +410,7 @@ class BluetoothController(private val context: Context) {
         when (parts.firstOrNull()?.uppercase()) {
             "MSG" -> parts.drop(1).joinToString(",").takeIf { it.isNotBlank() }?.let(::addStatus)
             "TARGET" -> {
-                val id = parts.getOrNull(1) ?: return
+                val id = parts.getOrNull(1)?.let(::canonicalObstacleId) ?: return
                 val target = parts.getOrNull(2) ?: return
                 val face = parts.getOrNull(3)?.let { code -> Face.values().firstOrNull { it.code == code.uppercase() } }
                 state = state.copy(obstacles = state.obstacles.map { obstacle ->
@@ -442,6 +429,12 @@ class BluetoothController(private val context: Context) {
             // a dump of everything received. The raw text is still visible via lastReceivedRaw.
             else -> {}
         }
+    }
+
+    /** Accept the checklist's numeric obstacle number and the ARCM slide's B-prefixed form. */
+    private fun canonicalObstacleId(rawId: String): String {
+        val cleaned = rawId.trim().uppercase()
+        return if (cleaned.startsWith("B")) cleaned else "B$cleaned"
     }
 
     private fun markConnectionLost(detail: String) {
