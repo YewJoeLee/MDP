@@ -91,7 +91,10 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.RequestMultiplePermissions()
     ) {
         bluetoothController.refreshDevices()
-        if (it.values.all { granted -> granted }) bluetoothController.startScan()
+        if (it.values.all { granted -> granted }) {
+            bluetoothController.startScan()
+            bluetoothController.startServerListening()
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -132,6 +135,7 @@ private fun ARCMApp(
 
     DisposableEffect(controller) {
         controller.refreshDevices()
+        controller.startServerListening()
         onDispose { }
     }
 
@@ -169,29 +173,30 @@ private fun ARCMApp(
             }
         }
     ) { padding ->
+        val onCommand: (String) -> Unit = { command ->
+            controller.moveRobot(command)
+            if (demoMode) controller.addStatus("Demo command: $command")
+        }
         when (AppTab.entries[selectedTab]) {
-            AppTab.CONTROL -> ControlScreen(
-                state = state,
-                demoMode = demoMode,
-                requestBluetoothPermissions = requestBluetoothPermissions,
-                onDemoModeChange = { demoMode = it },
-                onScan = {
-                    if (demoMode) controller.addStatus("Demo mode: Bluetooth scan skipped")
-                    else {
-                        requestBluetoothPermissions()
-                        controller.startScan()
-                    }
-                    showDevices = true
-                },
-                onConnect = controller::connect,
-                onDisconnect = controller::disconnect,
-                onSelectDevice = { showDevices = true },
-                onCommand = { command ->
-                    controller.send(command)
-                    if (demoMode) controller.addStatus("Demo command: $command")
-                },
-                padding = padding
-            )
+            AppTab.CONTROL -> ScreenColumn(padding) {
+                ConnectionCard(
+                    state = state,
+                    demoMode = demoMode,
+                    onDemoModeChange = { demoMode = it },
+                    onScan = {
+                        if (demoMode) controller.addStatus("Demo mode: Bluetooth scan skipped")
+                        else {
+                            requestBluetoothPermissions()
+                            controller.startScan()
+                        }
+                        showDevices = true
+                    },
+                    onConnect = controller::connect,
+                    onDisconnect = controller::disconnect,
+                    onSelectDevice = { showDevices = true }
+                )
+                StatusCard(state.statusMessages)
+            }
             AppTab.ARENA -> ScreenColumn(padding) {
                 ArenaCard(
                     state = state,
@@ -202,8 +207,10 @@ private fun ARCMApp(
                     onSetFace = controller::setObstacleFace,
                     onClearTarget = controller::clearObstacleTarget
                 )
+                ControlCard(enabled = demoMode || state.connected, onCommand = onCommand)
             }
-            AppTab.STATUS -> ScreenColumn(padding) {
+            AppTab.MANUAL -> ScreenColumn(padding) {
+                ControlCard(enabled = demoMode || state.connected, onCommand = onCommand)
                 StatusCard(state.statusMessages)
                 AssessmentStatusCard(state)
             }
@@ -225,6 +232,7 @@ private fun ARCMApp(
             },
             onSelect = {
                 controller.selectDevice(it)
+                if (!demoMode) controller.connect(it)
                 showDevices = false
             },
             deviceName = controller::deviceName
@@ -235,35 +243,7 @@ private fun ARCMApp(
 private enum class AppTab(val title: String) {
     CONTROL("Control"),
     ARENA("Arena"),
-    STATUS("Status")
-}
-
-@Composable
-private fun ControlScreen(
-    state: AppState,
-    demoMode: Boolean,
-    requestBluetoothPermissions: () -> Unit,
-    onDemoModeChange: (Boolean) -> Unit,
-    onScan: () -> Unit,
-    onConnect: (BluetoothDeviceInfo) -> Unit,
-    onDisconnect: () -> Unit,
-    onSelectDevice: () -> Unit,
-    onCommand: (String) -> Unit,
-    padding: PaddingValues
-) {
-    ScreenColumn(padding) {
-        ConnectionCard(
-            state = state,
-            demoMode = demoMode,
-            onDemoModeChange = onDemoModeChange,
-            onScan = onScan,
-            onConnect = onConnect,
-            onDisconnect = onDisconnect,
-            onSelectDevice = onSelectDevice
-        )
-        ControlCard(enabled = demoMode || state.connected, onCommand = onCommand)
-        StatusCard(state.statusMessages)
-    }
+    MANUAL("Manual")
 }
 
 @Composable
@@ -354,6 +334,11 @@ private fun ConnectionCard(
                 }
             }
             Text(state.connectionDetail, style = MaterialTheme.typography.bodySmall)
+            if (state.lastReceivedRaw != null) {
+                HorizontalDivider()
+                Text("Last received (C.1 evidence)", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+                Text(state.lastReceivedRaw, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
         }
     }
 }

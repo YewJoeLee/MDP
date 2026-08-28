@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothServerSocket
 import android.bluetooth.BluetoothSocket
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -15,9 +16,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
-import java.io.BufferedReader
 import java.io.IOException
-import java.io.InputStreamReader
 import java.io.OutputStream
 import java.util.UUID
 import java.util.concurrent.Executors
@@ -36,7 +35,14 @@ data class AppState(
     val obstacles: List<Obstacle> = emptyList(),
     val selectedObstacleId: String? = null,
     val robot: RobotState = RobotState(),
-    val statusMessages: List<StatusMessage> = emptyList()
+    val statusMessages: List<StatusMessage> = emptyList(),
+    /**
+     * Most recent raw line received over Bluetooth, whatever it is. This exists only to prove
+     * C.1 bidirectional text transfer (e.g. with the AMD Tool); it is a single overwritten value,
+     * not an accumulating log, so it does not become the "complete raw stream" C.4 forbids in the
+     * selective [statusMessages] feed.
+     */
+    val lastReceivedRaw: String? = null
 )
 
 /** Classic Bluetooth SPP transport used by the AMD Tool and the robot-side serial bridge. */
@@ -44,6 +50,7 @@ class BluetoothController(private val context: Context) {
     companion object {
         private val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
         private const val RECONNECT_DELAY_MS = 3_000L
+        private const val SERVICE_NAME = "MDPAndroid"
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -57,6 +64,8 @@ class BluetoothController(private val context: Context) {
     private var reconnectRunnable: Runnable? = null
     private var closed = false
     private var registered = false
+    private var serverSocket: BluetoothServerSocket? = null
+    private var listening = false
 
     var state by mutableStateOf(AppState())
         private set
@@ -151,20 +160,8 @@ class BluetoothController(private val context: Context) {
 
         connectionExecutor.execute {
             try {
-                val newSocket = bluetoothDevice.createRfcommSocketToServiceRecord(SPP_UUID)
-                newSocket.connect()
-                socket = newSocket
-                output = newSocket.outputStream
-                mainHandler.post {
-                    state = state.copy(
-                        connected = true,
-                        connectedAddress = deviceInfo.address,
-                        connectionStatus = "Connected",
-                        connectionDetail = "Connected to ${deviceInfo.name ?: deviceInfo.address}"
-                    )
-                    addStatus("Bluetooth connection established")
-                }
-                readLoop(newSocket)
+                val newSocket = openSocket(bluetoothDevice)
+                beginSession(newSocket, deviceInfo)
             } catch (error: IOException) {
                 mainHandler.post {
                     state = state.copy(
@@ -184,6 +181,74 @@ class BluetoothController(private val context: Context) {
         }
     }
 
+    /**
+     * The AMD Tool's documented default connection flow has the *tool* scan for and dial into the
+     * Android device (the tool acts as Bluetooth client), which requires this app to hold an open
+     * listening socket rather than only dialing out itself. This runs continuously in the
+     * background so either direction of connection works: our own Scan/Connect UI (Android as
+     * client), or the AMD Tool / robot initiating the connection to us (Android as server).
+     */
+    @SuppressLint("MissingPermission")
+    fun startServerListening() {
+        if (listening || closed || !hasBluetoothPermission()) return
+        listening = true
+        connectionExecutor.execute { runServerLoop() }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun runServerLoop() {
+        val bluetoothAdapter = adapter
+        if (bluetoothAdapter == null) {
+            listening = false
+            return
+        }
+        try {
+            val server = try {
+                bluetoothAdapter.listenUsingRfcommWithServiceRecord(SERVICE_NAME, SPP_UUID)
+            } catch (_: IOException) {
+                null
+            } ?: return
+            serverSocket = server
+            while (!closed) {
+                val accepted = try { server.accept() } catch (_: IOException) { null } ?: break
+                if (state.connected) {
+                    try { accepted.close() } catch (_: IOException) { }
+                    continue
+                }
+                val info = try { toInfo(accepted.remoteDevice) } catch (_: SecurityException) {
+                    BluetoothDeviceInfo(accepted.remoteDevice.address, null)
+                }
+                cancelReconnect()
+                beginSession(accepted, info)
+            }
+        } catch (_: SecurityException) {
+            // Permission revoked mid-listen; stop quietly, startServerListening() can retry later.
+        } finally {
+            try { serverSocket?.close() } catch (_: IOException) { }
+            serverSocket = null
+            listening = false
+        }
+    }
+
+    /** Shared success path for a connection established either by dialing out or by accepting an incoming one. */
+    private fun beginSession(newSocket: BluetoothSocket, deviceInfo: BluetoothDeviceInfo) {
+        lastDevice = newSocket.remoteDevice
+        socket = newSocket
+        output = newSocket.outputStream
+        mainHandler.post {
+            state = state.copy(
+                selectedDevice = deviceInfo,
+                selectedDeviceName = deviceInfo.name ?: deviceInfo.address,
+                connected = true,
+                connectedAddress = deviceInfo.address,
+                connectionStatus = "Connected",
+                connectionDetail = "Connected to ${deviceInfo.name ?: deviceInfo.address}"
+            )
+            addStatus("Bluetooth connection established")
+        }
+        readLoop(newSocket)
+    }
+
     fun disconnect() {
         cancelReconnect()
         lastDevice = null
@@ -195,6 +260,30 @@ class BluetoothController(private val context: Context) {
             connectionDetail = "Disconnected by user"
         )
         addStatus("Bluetooth disconnected")
+    }
+
+    /**
+     * Moves the on-screen robot marker immediately so the map reflects a control tap without
+     * waiting for the robot to echo back a `ROBOT` update, then sends the same command over
+     * Bluetooth. A later `ROBOT` message from the device still overwrites this local guess.
+     */
+    fun moveRobot(command: String) {
+        val robot = state.robot
+        val updated = when (command) {
+            "MOVE,F" -> robot.copy(
+                x = (robot.x + robot.direction.dx).coerceIn(0, MAP_COLUMNS - 1),
+                y = (robot.y + robot.direction.dy).coerceIn(0, MAP_ROWS - 1)
+            )
+            "MOVE,B" -> robot.copy(
+                x = (robot.x - robot.direction.dx).coerceIn(0, MAP_COLUMNS - 1),
+                y = (robot.y - robot.direction.dy).coerceIn(0, MAP_ROWS - 1)
+            )
+            "MOVE,L" -> robot.copy(direction = robot.direction.turnLeft())
+            "MOVE,R" -> robot.copy(direction = robot.direction.turnRight())
+            else -> null
+        }
+        if (updated != null) state = state.copy(robot = updated)
+        send(command)
     }
 
     fun send(command: String) {
@@ -262,6 +351,7 @@ class BluetoothController(private val context: Context) {
         closed = true
         cancelReconnect()
         closeSocket()
+        try { serverSocket?.close() } catch (_: IOException) { }
         if (registered) {
             try { context.unregisterReceiver(receiver) } catch (_: IllegalArgumentException) { }
             registered = false
@@ -270,13 +360,46 @@ class BluetoothController(private val context: Context) {
         writeExecutor.shutdownNow()
     }
 
+    /**
+     * Many robot-side SPP servers (HC-05 modules, ESP32/RPi rfcomm servers) don't answer SDP
+     * lookups correctly, which makes [BluetoothDevice.createRfcommSocketToServiceRecord] hang or
+     * fail even though the device is reachable. Fall back to the hidden channel-1 socket that
+     * most community Bluetooth SPP clients use for exactly this case.
+     */
+    @SuppressLint("MissingPermission")
+    private fun openSocket(device: BluetoothDevice): BluetoothSocket {
+        return try {
+            device.createRfcommSocketToServiceRecord(SPP_UUID).also { it.connect() }
+        } catch (standardError: IOException) {
+            try {
+                (device.javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
+                    .invoke(device, 1) as BluetoothSocket)
+                    .also { it.connect() }
+            } catch (_: Exception) {
+                throw standardError
+            }
+        }
+    }
+
+    /**
+     * Some test tools (e.g. the AMD Tool) write a message without a trailing newline, which makes
+     * a strict [BufferedReader.readLine] block forever waiting for a delimiter that never arrives.
+     * Read whatever bytes are available instead: split on newlines when present (so a
+     * newline-terminated protocol still works and multiple messages in one packet are separated),
+     * and treat a chunk with no newline as one complete message on its own.
+     */
     private fun readLoop(connectedSocket: BluetoothSocket) {
+        val buffer = ByteArray(1024)
         try {
-            val reader = BufferedReader(InputStreamReader(connectedSocket.inputStream, Charsets.UTF_8))
+            val input = connectedSocket.inputStream
             while (!closed && connectedSocket.isConnected) {
-                val line = reader.readLine() ?: break
-                val cleanLine = line.trim()
-                if (cleanLine.isNotEmpty()) mainHandler.post { parseIncoming(cleanLine) }
+                val bytesRead = input.read(buffer)
+                if (bytesRead == -1) break
+                val chunk = String(buffer, 0, bytesRead, Charsets.UTF_8)
+                chunk.split('\n', '\r')
+                    .map { it.trim() }
+                    .filter { it.isNotEmpty() }
+                    .forEach { line -> mainHandler.post { parseIncoming(line) } }
             }
         } catch (_: IOException) {
             // EOF and read errors both become a reconnect event below.
@@ -286,6 +409,7 @@ class BluetoothController(private val context: Context) {
     }
 
     private fun parseIncoming(line: String) {
+        state = state.copy(lastReceivedRaw = line)
         val parts = line.split(",").map { it.trim().removePrefix("[").removeSuffix("]") }
         when (parts.firstOrNull()?.uppercase()) {
             "MSG" -> parts.drop(1).joinToString(",").takeIf { it.isNotBlank() }?.let(::addStatus)
@@ -305,7 +429,9 @@ class BluetoothController(private val context: Context) {
                 state = state.copy(robot = RobotState(x, y, direction))
                 addStatus("Robot updated: ($x,$y) facing ${direction.code}")
             }
-            else -> addStatus("Ignored unrecognised message")
+            // No status entry here by design: C.4 requires the status feed to stay selective, not
+            // a dump of everything received. The raw text is still visible via lastReceivedRaw.
+            else -> {}
         }
     }
 
