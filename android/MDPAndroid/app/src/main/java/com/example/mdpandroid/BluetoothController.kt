@@ -37,12 +37,12 @@ data class AppState(
     val robot: RobotState = RobotState(),
     val statusMessages: List<StatusMessage> = emptyList(),
     /**
-     * Most recent raw line received over Bluetooth, whatever it is. This exists only to prove
-     * C.1 bidirectional text transfer (e.g. with the AMD Tool); it is a single overwritten value,
-     * not an accumulating log, so it does not become the "complete raw stream" C.4 forbids in the
-     * selective [statusMessages] feed.
+     * History of every raw line received over Bluetooth, whatever it is. This exists to prove C.1
+     * bidirectional text transfer (e.g. with the AMD Tool) and is shown in its own scrollable
+     * window on the Control tab, kept separate from the curated [statusMessages] feed so it never
+     * becomes the "complete raw stream" that C.4 forbids in that selective display.
      */
-    val lastReceivedRaw: String? = null
+    val receivedRawLog: List<StatusMessage> = emptyList()
 )
 
 /** Classic Bluetooth SPP transport used by the AMD Tool and the robot-side serial bridge. */
@@ -266,20 +266,24 @@ class BluetoothController(private val context: Context) {
      * Moves the on-screen robot marker immediately so the map reflects a control tap without
      * waiting for the robot to echo back a `ROBOT` update, then sends the same command over
      * Bluetooth. A later `ROBOT` message from the device still overwrites this local guess.
+     *
+     * Command strings match the AMD Tool's default Settings -> Received Commands mapping
+     * (f/r/tl/tr) so the tool recognises them and reflects the move in its own Command Log
+     * without needing to be reconfigured first.
      */
     fun moveRobot(command: String) {
         val robot = state.robot
         val updated = when (command) {
-            "MOVE,F" -> robot.copy(
+            "f" -> robot.copy(
                 x = (robot.x + robot.direction.dx).coerceIn(0, MAP_COLUMNS - 1),
                 y = (robot.y + robot.direction.dy).coerceIn(0, MAP_ROWS - 1)
             )
-            "MOVE,B" -> robot.copy(
+            "r" -> robot.copy(
                 x = (robot.x - robot.direction.dx).coerceIn(0, MAP_COLUMNS - 1),
                 y = (robot.y - robot.direction.dy).coerceIn(0, MAP_ROWS - 1)
             )
-            "MOVE,L" -> robot.copy(direction = robot.direction.turnLeft())
-            "MOVE,R" -> robot.copy(direction = robot.direction.turnRight())
+            "tl" -> robot.copy(direction = robot.direction.turnLeft())
+            "tr" -> robot.copy(direction = robot.direction.turnRight())
             else -> null
         }
         if (updated != null) state = state.copy(robot = updated)
@@ -343,6 +347,11 @@ class BluetoothController(private val context: Context) {
     fun addStatus(message: String) {
         val timestamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())
         state = state.copy(statusMessages = (state.statusMessages + StatusMessage(timestamp, message)).takeLast(40))
+    }
+
+    private fun addRawReceived(line: String) {
+        val timestamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())
+        state = state.copy(receivedRawLog = (state.receivedRawLog + StatusMessage(timestamp, line)).takeLast(100))
     }
 
     fun deviceName(info: BluetoothDeviceInfo): String = info.name ?: info.address
@@ -409,7 +418,7 @@ class BluetoothController(private val context: Context) {
     }
 
     private fun parseIncoming(line: String) {
-        state = state.copy(lastReceivedRaw = line)
+        addRawReceived(line)
         val parts = line.split(",").map { it.trim().removePrefix("[").removeSuffix("]") }
         when (parts.firstOrNull()?.uppercase()) {
             "MSG" -> parts.drop(1).joinToString(",").takeIf { it.isNotBlank() }?.let(::addStatus)

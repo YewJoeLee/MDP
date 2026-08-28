@@ -196,6 +196,7 @@ private fun ARCMApp(
                     onSelectDevice = { showDevices = true }
                 )
                 StatusCard(state.statusMessages)
+                ReceivedRawCard(state.receivedRawLog)
             }
             AppTab.ARENA -> ScreenColumn(padding) {
                 ArenaCard(
@@ -262,7 +263,7 @@ private fun ScreenColumn(padding: PaddingValues, content: @Composable () -> Unit
 
 @Composable
 private fun AssessmentStatusCard(state: AppState) {
-    Card {
+    Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Assessment readiness", fontWeight = FontWeight.Bold)
             Text("Task 1  •  Automatic movement and image recognition", style = MaterialTheme.typography.bodyMedium)
@@ -290,7 +291,10 @@ private fun ConnectionCard(
     onDisconnect: () -> Unit,
     onSelectDevice: () -> Unit
 ) {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Bluetooth connection", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
@@ -334,10 +338,27 @@ private fun ConnectionCard(
                 }
             }
             Text(state.connectionDetail, style = MaterialTheme.typography.bodySmall)
-            if (state.lastReceivedRaw != null) {
-                HorizontalDivider()
-                Text("Last received (C.1 evidence)", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
-                Text(state.lastReceivedRaw, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+@Composable
+private fun ReceivedRawCard(messages: List<StatusMessage>) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Column(Modifier.padding(12.dp)) {
+            Text("Received text (raw, C.1 evidence)", fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(6.dp))
+            if (messages.isEmpty()) {
+                Text("No raw text received yet.", style = MaterialTheme.typography.bodySmall)
+            } else {
+                LazyColumn(modifier = Modifier.height(160.dp), reverseLayout = true) {
+                    items(messages.asReversed()) { message ->
+                        Text("${message.time}  ${message.text}", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 2.dp))
+                    }
+                }
             }
         }
     }
@@ -345,28 +366,28 @@ private fun ConnectionCard(
 
 @Composable
 private fun ControlCard(enabled: Boolean, onCommand: (String) -> Unit) {
-    Card {
+    Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text("Robot controls", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                 Text(if (enabled) "Ready" else "Connect or enable demo mode", style = MaterialTheme.typography.bodySmall)
             }
             Spacer(Modifier.height(8.dp))
-            IconButton(onClick = { onCommand("MOVE,F") }, enabled = enabled, modifier = Modifier.size(52.dp)) {
+            IconButton(onClick = { onCommand("f") }, enabled = enabled, modifier = Modifier.size(52.dp)) {
                 Icon(Icons.Default.KeyboardArrowUp, contentDescription = "Forward", modifier = Modifier.size(36.dp))
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = { onCommand("MOVE,L") }, enabled = enabled, modifier = Modifier.size(52.dp)) {
+                IconButton(onClick = { onCommand("tl") }, enabled = enabled, modifier = Modifier.size(52.dp)) {
                     Icon(Icons.Default.KeyboardArrowLeft, contentDescription = "Left", modifier = Modifier.size(36.dp))
                 }
                 Button(onClick = { onCommand("STOP") }, enabled = enabled, modifier = Modifier.size(76.dp, 48.dp), contentPadding = PaddingValues(0.dp)) {
                     Icon(Icons.Default.Stop, contentDescription = "Stop")
                 }
-                IconButton(onClick = { onCommand("MOVE,R") }, enabled = enabled, modifier = Modifier.size(52.dp)) {
+                IconButton(onClick = { onCommand("tr") }, enabled = enabled, modifier = Modifier.size(52.dp)) {
                     Icon(Icons.Default.KeyboardArrowRight, contentDescription = "Right", modifier = Modifier.size(36.dp))
                 }
             }
-            IconButton(onClick = { onCommand("MOVE,B") }, enabled = enabled, modifier = Modifier.size(52.dp)) {
+            IconButton(onClick = { onCommand("r") }, enabled = enabled, modifier = Modifier.size(52.dp)) {
                 Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Backward", modifier = Modifier.size(36.dp))
             }
         }
@@ -384,7 +405,7 @@ private fun ArenaCard(
     onClearTarget: (String) -> Unit
 ) {
     val selected = state.obstacles.firstOrNull { it.id == state.selectedObstacleId }
-    Card {
+    Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Arena map", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
@@ -547,7 +568,7 @@ private fun gridPoint(offset: Offset, width: Float, height: Float): GridPoint {
 
 @Composable
 private fun StatusCard(messages: List<StatusMessage>) {
-    Card {
+    Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp)) {
             Text("Robot status", fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(6.dp))
