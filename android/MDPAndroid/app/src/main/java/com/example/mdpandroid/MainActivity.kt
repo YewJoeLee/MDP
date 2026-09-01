@@ -13,11 +13,12 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -30,10 +31,14 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.BluetoothDisabled
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -47,7 +52,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRowDefaults
 import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.Text
@@ -57,6 +64,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -75,10 +83,22 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.mdpandroid.ui.theme.MDPAndroidTheme
+import com.example.mdpandroid.ui.theme.MissionError
+import com.example.mdpandroid.ui.theme.MissionTeal
+import com.example.mdpandroid.ui.theme.ObstacleBlue
+import com.example.mdpandroid.ui.theme.RobotGreen
+import com.example.mdpandroid.ui.theme.SuccessContainer
+import com.example.mdpandroid.ui.theme.TargetAmber
 import kotlin.math.floor
 
 internal const val MAP_COLUMNS = 20
 internal const val MAP_ROWS = 20
+private val SpaceXs = 4.dp
+private val SpaceSm = 8.dp
+private val PageGutter = 12.dp
+private val CardInset = 12.dp
+private val SectionGap = 12.dp
+private val ArenaTopGutter = SpaceSm
 
 class MainActivity : ComponentActivity() {
     private lateinit var bluetoothController: BluetoothController
@@ -109,7 +129,17 @@ class MainActivity : ComponentActivity() {
         } else {
             arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
         }
-        permissionLauncher.launch(permissions)
+        val missing = permissions.filter {
+            androidx.core.content.ContextCompat.checkSelfPermission(this, it) !=
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isEmpty()) {
+            bluetoothController.refreshDevices()
+            bluetoothController.startScan()
+            bluetoothController.startServerListening()
+        } else {
+            permissionLauncher.launch(missing.toTypedArray())
+        }
     }
 
     override fun onDestroy() {
@@ -127,7 +157,7 @@ private fun ARCMApp(
     val state = controller.state
     var showDevices by remember { mutableStateOf(false) }
     var demoMode by remember { mutableStateOf(false) }
-    var selectedTab by rememberSaveable { mutableStateOf(0) }
+    var selectedTab by rememberSaveable { mutableIntStateOf(0) }
 
     DisposableEffect(controller) {
         controller.refreshDevices()
@@ -136,32 +166,38 @@ private fun ARCMApp(
     }
 
     Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             Column {
                 TopAppBar(
                     title = {
                         Column {
-                            Text("MDP Remote Controller", fontWeight = FontWeight.Bold)
-                            Text("Android Remote Controller Module", fontSize = 11.sp)
+                            Text("MDP Robot Console", fontWeight = FontWeight.Bold)
+                            Text("Mission control and assessment workspace", fontSize = 11.sp)
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.primaryContainer
+                        containerColor = MaterialTheme.colorScheme.primaryContainer,
+                        titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
                     ),
                     actions = {
-                        Icon(
-                            imageVector = if (state.connected) Icons.Default.Bluetooth else Icons.Default.BluetoothDisabled,
-                            contentDescription = null,
-                            tint = if (state.connected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(end = 16.dp)
-                        )
+                        ConnectionIndicator(connected = state.connected, demoMode = demoMode)
                     }
                 )
-                PrimaryTabRow(selectedTabIndex = selectedTab) {
+                PrimaryTabRow(
+                    selectedTabIndex = selectedTab,
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    indicator = {
+                        TabRowDefaults.PrimaryIndicator(color = MaterialTheme.colorScheme.primary)
+                    }
+                ) {
                     AppTab.entries.forEachIndexed { index, tab ->
                         Tab(
                             selected = selectedTab == index,
                             onClick = { selectedTab = index },
+                            selectedContentColor = MaterialTheme.colorScheme.primary,
+                            unselectedContentColor = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.72f),
                             text = { Text(tab.title) }
                         )
                     }
@@ -174,43 +210,47 @@ private fun ARCMApp(
             if (demoMode) controller.addStatus("Demo command: $command")
         }
         when (AppTab.entries[selectedTab]) {
-            AppTab.CONTROL -> ScreenColumn(padding) {
+            AppTab.OVERVIEW -> ScreenColumn(padding) {
+                MissionOverviewCard(state = state, demoMode = demoMode)
                 ConnectionCard(
                     state = state,
                     demoMode = demoMode,
                     onDemoModeChange = { demoMode = it },
                     onScan = {
                         if (demoMode) controller.addStatus("Demo mode: Bluetooth scan skipped")
-                        else {
-                            requestBluetoothPermissions()
-                            controller.startScan()
-                        }
+                        else requestBluetoothPermissions()
                         showDevices = true
                     },
                     onConnect = controller::connect,
                     onDisconnect = controller::disconnect,
                     onSelectDevice = { showDevices = true }
                 )
-                StatusCard(state.statusMessages)
-                ReceivedRawCard(state.receivedRawLog)
-            }
-            AppTab.ARENA -> ScreenColumn(padding) {
-                ArenaCard(
-                    state = state,
-                    onAddObstacle = controller::addObstacleAt,
-                    onMoveObstacle = controller::moveObstacle,
-                    onRemoveObstacle = controller::removeObstacle,
-                    onSelectObstacle = controller::selectObstacle,
-                    onSetFace = controller::setObstacleFace,
-                    onClearTarget = controller::clearObstacleTarget
+                RobotActivityCard(
+                    statusMessages = state.statusMessages,
+                    receivedRawMessages = state.receivedRawLog
                 )
-                ControlCard(enabled = demoMode || state.connected, onCommand = onCommand)
             }
-            AppTab.MANUAL -> ScreenColumn(padding) {
+            AppTab.ARENA -> ArenaScreen(
+                padding = padding,
+                state = state,
+                controlsEnabled = demoMode || state.connected,
+                onCommand = onCommand,
+                onAddObstacle = controller::addObstacleAt,
+                onMoveObstacle = controller::moveObstacle,
+                onRemoveObstacle = controller::removeObstacle,
+                onSelectObstacle = controller::selectObstacle,
+                onSetFace = controller::setObstacleFace,
+                onClearTarget = controller::clearObstacleTarget,
+                onCloseFaceSelection = controller::clearObstacleSelection
+            )
+            AppTab.CONTROLS -> ScreenColumn(padding) {
+                ControlAvailabilityCard(enabled = demoMode || state.connected, demoMode = demoMode)
                 ControlCard(enabled = demoMode || state.connected, onCommand = onCommand)
-                AmdToolCommandCard(enabled = demoMode || state.connected, onCommand = onCommand)
-                StatusCard(state.statusMessages)
-                AssessmentStatusCard(state)
+                AssessmentCommandCard(enabled = demoMode || state.connected, onCommand = onCommand)
+                RobotActivityCard(
+                    statusMessages = state.statusMessages,
+                    receivedRawMessages = state.receivedRawLog
+                )
             }
         }
     }
@@ -223,10 +263,7 @@ private fun ARCMApp(
             onDismiss = { showDevices = false },
             onScan = {
                 if (demoMode) controller.addStatus("Demo mode: no Bluetooth devices")
-                else {
-                    requestBluetoothPermissions()
-                    controller.startScan()
-                }
+                else requestBluetoothPermissions()
             },
             onSelect = {
                 controller.selectDevice(it)
@@ -239,9 +276,37 @@ private fun ARCMApp(
 }
 
 private enum class AppTab(val title: String) {
-    CONTROL("Control"),
+    OVERVIEW("Overview"),
     ARENA("Arena"),
-    MANUAL("Manual")
+    CONTROLS("Controls")
+}
+
+@Composable
+private fun ConnectionIndicator(connected: Boolean, demoMode: Boolean) {
+    val active = connected || demoMode
+    Surface(
+        shape = RoundedCornerShape(50),
+        color = if (active) SuccessContainer else MaterialTheme.colorScheme.surface,
+        modifier = Modifier.padding(end = 16.dp)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Icon(
+                imageVector = if (active) Icons.Default.Bluetooth else Icons.Default.BluetoothDisabled,
+                contentDescription = null,
+                tint = if (active) MissionTeal else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(16.dp)
+            )
+            Text(
+                if (demoMode) "Demo" else if (connected) "Live" else "Offline",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+    }
 }
 
 @Composable
@@ -251,30 +316,158 @@ private fun ScreenColumn(padding: PaddingValues, content: @Composable () -> Unit
             .fillMaxSize()
             .padding(padding)
             .verticalScroll(rememberScrollState())
-        .padding(12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        .padding(PageGutter),
+        verticalArrangement = Arrangement.spacedBy(SectionGap),
     ) {
         content()
     }
 }
 
 @Composable
-private fun AssessmentStatusCard(state: AppState) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Assessment readiness", fontWeight = FontWeight.Bold)
-            Text("Task 1  •  Automatic movement and image recognition", style = MaterialTheme.typography.bodyMedium)
-            Text("Monitor MSG, TARGET, and ROBOT updates during the run.", style = MaterialTheme.typography.bodySmall)
+private fun ArenaScreen(
+    padding: PaddingValues,
+    state: AppState,
+    controlsEnabled: Boolean,
+    onCommand: (String) -> Unit,
+    onAddObstacle: (GridPoint) -> Unit,
+    onMoveObstacle: (String, Int, Int) -> Unit,
+    onRemoveObstacle: (String) -> Unit,
+    onSelectObstacle: (String) -> Unit,
+    onSetFace: (String, Face) -> Unit,
+    onClearTarget: (String) -> Unit,
+    onCloseFaceSelection: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(padding)
+            .verticalScroll(rememberScrollState())
+            .padding(
+                start = PageGutter,
+                top = ArenaTopGutter,
+                end = PageGutter,
+                bottom = PageGutter
+            ),
+        verticalArrangement = Arrangement.spacedBy(SectionGap)
+    ) {
+        ArenaCard(
+            state = state,
+            onAddObstacle = onAddObstacle,
+            onMoveObstacle = onMoveObstacle,
+            onRemoveObstacle = onRemoveObstacle,
+            onSelectObstacle = onSelectObstacle,
+            onSetFace = onSetFace,
+            onClearTarget = onClearTarget,
+            onCloseFaceSelection = onCloseFaceSelection
+        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = CardInset)
+                .height(198.dp),
+            horizontalArrangement = Arrangement.spacedBy(SectionGap)
+        ) {
+            ArenaDriveCard(
+                enabled = controlsEnabled,
+                onCommand = onCommand,
+                modifier = Modifier.weight(0.9f)
+            )
+            RobotActivityCard(
+                statusMessages = state.statusMessages,
+                receivedRawMessages = state.receivedRawLog,
+                modifier = Modifier.weight(1.3f),
+                compact = true,
+                fillHeight = true
+            )
+        }
+    }
+}
+
+@Composable
+private fun MissionOverviewCard(state: AppState, demoMode: Boolean) {
+    val targetCount = state.obstacles.count { it.targetId != null }
+    val connectionLabel = when {
+        demoMode -> "Demo mode"
+        state.connected -> "Robot connected"
+        else -> "Robot offline"
+    }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+    ) {
+        Column(Modifier.padding(CardInset), verticalArrangement = Arrangement.spacedBy(SectionGap)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Mission overview", fontWeight = FontWeight.Bold)
+                    Text(connectionLabel, style = MaterialTheme.typography.bodySmall)
+                }
+                Text(
+                    text = if (demoMode || state.connected) "READY" else "SETUP",
+                    color = if (demoMode || state.connected) MissionTeal else MaterialTheme.colorScheme.error,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
             HorizontalDivider()
-            Text("Task 2  •  Fastest car using visual recognition", style = MaterialTheme.typography.bodyMedium)
-            Text("Use Begin Fastest Path when the team agrees on the run-control protocol.", style = MaterialTheme.typography.bodySmall)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                OverviewMetric("Arena", "${state.obstacles.size} obstacles")
+                OverviewMetric("Targets", "$targetCount identified")
+                OverviewMetric("Robot", "(${state.robot.x}, ${state.robot.y})")
+            }
             Text(
-                if (state.connected) "Bluetooth link ready for live integration." else "Connect Bluetooth before live assessment.",
-                color = if (state.connected) Color(0xFF197A43) else MaterialTheme.colorScheme.error,
-                fontWeight = FontWeight.SemiBold,
+                "Prepare and observe the field in Arena. Use Controls only when you are ready to drive or launch an agreed assessment run.",
                 style = MaterialTheme.typography.bodySmall
             )
         }
+    }
+}
+
+@Composable
+private fun OverviewMetric(label: String, value: String) {
+    Column {
+        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(value, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+@Composable
+private fun ControlAvailabilityCard(enabled: Boolean, demoMode: Boolean) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (enabled) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.errorContainer
+        )
+    ) {
+        Row(
+            modifier = Modifier.padding(CardInset),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(if (enabled) "Controls are armed" else "Controls are unavailable", fontWeight = FontWeight.Bold)
+                Text(
+                    if (demoMode) "Commands will be recorded locally in demo mode."
+                    else if (enabled) "Commands are sent to the active Bluetooth connection."
+                    else "Connect a robot on Overview, or enable demo mode to practise.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+            Text(
+                if (enabled) "READY" else "OFFLINE",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                color = if (enabled) MissionTeal else MaterialTheme.colorScheme.error
+            )
+        }
+    }
+}
+
+@Composable
+private fun ArenaLegendItem(color: Color, label: String) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        Surface(color = color, shape = RoundedCornerShape(50), modifier = Modifier.size(8.dp)) {}
+        Text(label, style = MaterialTheme.typography.labelSmall)
     }
 }
 
@@ -289,50 +482,67 @@ private fun ConnectionCard(
     onSelectDevice: () -> Unit
 ) {
     Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(20.dp)),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
     ) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Column(Modifier.padding(CardInset), verticalArrangement = Arrangement.spacedBy(SectionGap)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Bluetooth connection", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                 Text(
                     text = if (demoMode) "DEMO" else if (state.connected) "CONNECTED" else state.connectionStatus.uppercase(),
-                    color = if (demoMode || state.connected) Color(0xFF197A43) else MaterialTheme.colorScheme.error,
+                    color = if (demoMode || state.connected) MissionTeal else MaterialTheme.colorScheme.error,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold
                 )
             }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                FilterChip(
-                    selected = demoMode,
-                    onClick = { onDemoModeChange(!demoMode) },
-                    label = { Text("Demo mode") }
-                )
-                Spacer(Modifier.width(8.dp))
+            if (state.connected) {
                 Text(
-                    text = if (demoMode) "Test the map and protocol without hardware" else "Use AMD Tool or the robot SPP device",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    "Connected to ${state.selectedDeviceName ?: state.connectedAddress ?: "robot"}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold
                 )
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                OutlinedButton(onClick = onScan, enabled = !state.scanning && !demoMode) {
-                    Icon(Icons.Default.Refresh, contentDescription = null)
-                    Spacer(Modifier.width(4.dp))
-                    Text(if (state.scanning) "Scanning..." else "Scan")
+                Button(onClick = onDisconnect, modifier = Modifier.fillMaxWidth()) { Text("Disconnect robot") }
+            } else {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    FilterChip(
+                        selected = demoMode,
+                        onClick = { onDemoModeChange(!demoMode) },
+                        label = { Text("Demo mode") }
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = if (demoMode) "Test the map and protocol without hardware" else "Use AMD Tool or the robot SPP device",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
-                OutlinedButton(onClick = onSelectDevice, enabled = state.devices.isNotEmpty() && !demoMode) {
-                    Text(state.selectedDeviceName ?: "Select device", maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Icon(Icons.Default.KeyboardArrowDown, contentDescription = null)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedButton(
+                        onClick = onScan,
+                        enabled = !state.scanning && !demoMode,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Default.Refresh, contentDescription = null)
+                        Spacer(Modifier.width(4.dp))
+                        Text(if (state.scanning) "Scanning..." else "Scan")
+                    }
+                    OutlinedButton(
+                        onClick = onSelectDevice,
+                        enabled = !demoMode,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(state.selectedDeviceName ?: "Choose robot", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Icon(Icons.Default.KeyboardArrowDown, contentDescription = null)
+                    }
                 }
-                if (state.connected) {
-                    Button(onClick = onDisconnect) { Text("Disconnect") }
-                } else {
-                    Button(
-                        onClick = { state.selectedDevice?.let(onConnect) },
-                        enabled = state.selectedDevice != null && !demoMode
-                    ) { Text("Connect") }
-                }
+                Button(
+                    onClick = { state.selectedDevice?.let(onConnect) },
+                    enabled = state.selectedDevice != null && !demoMode,
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Connect robot") }
             }
             Text(state.connectionDetail, style = MaterialTheme.typography.bodySmall)
         }
@@ -340,20 +550,52 @@ private fun ConnectionCard(
 }
 
 @Composable
-private fun ReceivedRawCard(messages: List<StatusMessage>) {
+private fun RobotActivityCard(
+    statusMessages: List<StatusMessage>,
+    receivedRawMessages: List<StatusMessage>,
+    modifier: Modifier = Modifier,
+    compact: Boolean = false,
+    fillHeight: Boolean = false
+) {
+    val logEntries = mergeActivityLog(statusMessages, receivedRawMessages)
     Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+        modifier = modifier
+            .fillMaxWidth()
+            .then(if (fillHeight) Modifier.fillMaxHeight() else Modifier)
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(20.dp)),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
     ) {
-        Column(Modifier.padding(12.dp)) {
-            Text("Received text (raw, C.1 evidence)", fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(6.dp))
-            if (messages.isEmpty()) {
-                Text("No raw text received yet.", style = MaterialTheme.typography.bodySmall)
+        Column(Modifier.padding(CardInset), verticalArrangement = Arrangement.spacedBy(SectionGap)) {
+            Text("Robot activity", fontWeight = FontWeight.Bold)
+            if (!compact) {
+                Text(
+                    "One chronological log for run status and incoming Bluetooth text.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (logEntries.isEmpty()) {
+                Text("No robot activity yet.", style = MaterialTheme.typography.bodySmall)
             } else {
-                LazyColumn(modifier = Modifier.height(160.dp), reverseLayout = true) {
-                    items(messages.asReversed()) { message ->
-                        Text("${message.time}  ${message.text}", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 2.dp))
+                LazyColumn(modifier = Modifier.height(if (compact) 124.dp else 180.dp), reverseLayout = true) {
+                    items(logEntries.asReversed()) { entry ->
+                        Row(modifier = Modifier.padding(vertical = 2.dp), verticalAlignment = Alignment.Top) {
+                            Text(
+                                entry.source.name.lowercase().replaceFirstChar(Char::uppercase),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (entry.source == ActivitySource.RECEIVED) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.width(64.dp)
+                            )
+                            Text(
+                                "${entry.message.time}  ${entry.message.text}",
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.weight(1f),
+                                maxLines = if (compact) 1 else Int.MAX_VALUE,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                     }
                 }
             }
@@ -363,52 +605,127 @@ private fun ReceivedRawCard(messages: List<StatusMessage>) {
 
 @Composable
 private fun ControlCard(enabled: Boolean, onCommand: (String) -> Unit) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Column(Modifier.padding(CardInset), horizontalAlignment = Alignment.CenterHorizontally) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("Drive controls", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                Text(if (enabled) "Ready" else "Connect or enable demo mode", style = MaterialTheme.typography.bodySmall)
+                Column(Modifier.weight(1f)) {
+                    Text("Manual drive", fontWeight = FontWeight.Bold)
+                    Text("Use for positioning and controlled testing", style = MaterialTheme.typography.bodySmall)
+                }
+                Text(if (enabled) "READY" else "OFFLINE", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
             }
             Text(
-                "AMDTOOL commands: f, r, tl, tr. The map updates from ROBOT messages.",
+                "The map follows confirmed ROBOT updates; it does not predict a movement after a button press.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(Modifier.height(8.dp))
-            Button(onClick = { onCommand("f") }, enabled = enabled) {
-                Text("Forward")
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                OutlinedButton(onClick = { onCommand("tl") }, enabled = enabled) { Text("Turn left") }
-                OutlinedButton(onClick = { onCommand("tr") }, enabled = enabled) { Text("Turn right") }
-            }
-            Button(onClick = { onCommand("r") }, enabled = enabled) {
-                Text("Reverse")
-            }
+            DrivePad(enabled = enabled, onCommand = onCommand, buttonSize = 64.dp)
         }
     }
 }
 
 @Composable
-private fun AmdToolCommandCard(enabled: Boolean, onCommand: (String) -> Unit) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("AMDTOOL task commands", fontWeight = FontWeight.Bold)
+private fun ArenaDriveCard(enabled: Boolean, onCommand: (String) -> Unit, modifier: Modifier = Modifier) {
+    Card(
+        modifier = modifier.fillMaxSize(),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Column(
+            modifier = Modifier.padding(CardInset).fillMaxSize(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text("Manual control", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+            DrivePad(enabled = enabled, onCommand = onCommand, buttonSize = 42.dp)
+        }
+    }
+}
+
+@Composable
+private fun DrivePad(enabled: Boolean, onCommand: (String) -> Unit, buttonSize: androidx.compose.ui.unit.Dp) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        DriveCommandButton(
+            icon = Icons.Default.KeyboardArrowUp,
+            contentDescription = "Move forward",
+            enabled = enabled,
+            buttonSize = buttonSize,
+            onClick = { onCommand("f") }
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(buttonSize / 6), verticalAlignment = Alignment.CenterVertically) {
+            DriveCommandButton(
+                icon = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+                contentDescription = "Turn left",
+                enabled = enabled,
+                buttonSize = buttonSize,
+                onClick = { onCommand("tl") }
+            )
+            DriveCommandButton(
+                icon = Icons.Default.KeyboardArrowDown,
+                contentDescription = "Reverse",
+                enabled = enabled,
+                buttonSize = buttonSize,
+                onClick = { onCommand("r") }
+            )
+            DriveCommandButton(
+                icon = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = "Turn right",
+                enabled = enabled,
+                buttonSize = buttonSize,
+                onClick = { onCommand("tr") }
+            )
+        }
+    }
+}
+
+@Composable
+private fun DriveCommandButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    contentDescription: String,
+    enabled: Boolean,
+    buttonSize: androidx.compose.ui.unit.Dp,
+    onClick: () -> Unit
+) {
+    Button(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier.size(buttonSize),
+        shape = RoundedCornerShape(buttonSize / 3),
+        contentPadding = PaddingValues(0.dp)
+    ) {
+        Icon(icon, contentDescription = contentDescription, modifier = Modifier.size(buttonSize * 0.56f))
+    }
+}
+
+@Composable
+private fun AssessmentCommandCard(enabled: Boolean, onCommand: (String) -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+    ) {
+        Column(Modifier.padding(CardInset), verticalArrangement = Arrangement.spacedBy(SectionGap)) {
+            Text("Assessment runs", fontWeight = FontWeight.Bold)
             Text(
-                "These exact tokens match the AMDTOOL Settings > Received Commands screen.",
+                "Start a run only after the team agrees the robot-side protocol and the arena is ready.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 Button(onClick = { onCommand("beginExplore") }, enabled = enabled, modifier = Modifier.weight(1f)) {
-                    Text("Begin exploration")
+                    Text("Task 1\nExplore")
                 }
                 Button(onClick = { onCommand("beginFastest") }, enabled = enabled, modifier = Modifier.weight(1f)) {
-                    Text("Begin fastest path")
+                    Text("Task 2\nFastest path")
                 }
             }
-            OutlinedButton(onClick = { onCommand("sendArena") }, enabled = enabled, modifier = Modifier.align(Alignment.CenterHorizontally)) {
-                Text("Send arena info")
+            OutlinedButton(onClick = { onCommand("sendArena") }, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
+                Text("Send current arena to robot")
             }
         }
     }
@@ -422,49 +739,207 @@ private fun ArenaCard(
     onRemoveObstacle: (String) -> Unit,
     onSelectObstacle: (String) -> Unit,
     onSetFace: (String, Face) -> Unit,
-    onClearTarget: (String) -> Unit
+    onClearTarget: (String) -> Unit,
+    onCloseFaceSelection: () -> Unit
 ) {
     val selected = state.obstacles.firstOrNull { it.id == state.selectedObstacleId }
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    val preferredMapSide = 432.dp
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+    ) {
+        Column(Modifier.padding(CardInset), verticalArrangement = Arrangement.spacedBy(SectionGap)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Arena map", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                Text("Tap empty cell to add obstacle", style = MaterialTheme.typography.bodySmall)
+                Column(Modifier.weight(1f)) {
+                    Text("Arena workspace", fontWeight = FontWeight.Bold)
+                    Text("20 × 20 field • ${state.obstacles.size} obstacles placed", style = MaterialTheme.typography.bodySmall)
+                }
+                Text(
+                    "EDIT MODE",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.Bold
+                )
             }
-            ArenaCanvas(
-                state = state,
-                onAddObstacle = onAddObstacle,
-                onMoveObstacle = onMoveObstacle,
-                onSelectObstacle = onSelectObstacle,
-                modifier = Modifier.fillMaxWidth()
-            )
-            Text(
-                "Coordinates: x 0-${MAP_COLUMNS - 1}, y 0-${MAP_ROWS - 1}. Drag an obstacle outside the arena to remove it.",
-                style = MaterialTheme.typography.bodySmall
-            )
+            BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+                val sidePanelWidth = 128.dp
+                val mapSide = minOf(
+                    preferredMapSide,
+                    (maxWidth - sidePanelWidth - SectionGap).coerceAtLeast(1.dp)
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(SectionGap)
+                ) {
+                    ArenaCanvas(
+                        state = state,
+                        onAddObstacle = onAddObstacle,
+                        onMoveObstacle = onMoveObstacle,
+                        onSelectObstacle = onSelectObstacle,
+                        modifier = Modifier.size(mapSide)
+                    )
+                    ArenaSidePanel(
+                        state = state,
+                        modifier = Modifier
+                            .width(sidePanelWidth)
+                            .height(mapSide)
+                    )
+                }
+            }
             if (selected != null) {
-                HorizontalDivider()
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Selected ${selected.id} at (${selected.x}, ${selected.y})", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                    IconButton(onClick = { onRemoveObstacle(selected.id) }) {
+                TargetFaceSelection(
+                    obstacle = selected,
+                    onSetFace = onSetFace,
+                    onClearTarget = onClearTarget,
+                    onRemoveObstacle = onRemoveObstacle,
+                    onDone = onCloseFaceSelection
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun TargetFaceSelection(
+    obstacle: Obstacle,
+    onSetFace: (String, Face) -> Unit,
+    onClearTarget: (String) -> Unit,
+    onRemoveObstacle: (String) -> Unit,
+    onDone: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(16.dp)),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+    ) {
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            if (maxWidth >= 480.dp) {
+                Row(
+                    modifier = Modifier.padding(horizontal = CardInset, vertical = SpaceSm),
+                    horizontalArrangement = Arrangement.spacedBy(SpaceXs),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    ObstacleDetails(obstacle, modifier = Modifier.width(112.dp))
+                    Text("Face", style = MaterialTheme.typography.labelSmall)
+                    FaceChoices(obstacle, onSetFace)
+                    if (obstacle.targetFace != null) {
+                        IconButton(onClick = { onClearTarget(obstacle.id) }) {
+                            Icon(Icons.Default.Refresh, contentDescription = "Clear selected face")
+                        }
+                    }
+                    Spacer(Modifier.weight(1f))
+                    IconButton(onClick = onDone) {
+                        Icon(Icons.Default.Check, contentDescription = "Done selecting target face")
+                    }
+                    IconButton(onClick = { onRemoveObstacle(obstacle.id) }) {
                         Icon(Icons.Default.Delete, contentDescription = "Remove obstacle")
                     }
                 }
-                Text("Touch a face to annotate the target image:", style = MaterialTheme.typography.bodySmall)
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Face.values().forEach { face ->
-                        FilterChip(
-                            selected = selected.targetFace == face,
-                            onClick = { onSetFace(selected.id, face) },
-                            label = { Text(face.code) }
-                        )
+            } else {
+                Column(
+                    modifier = Modifier.padding(CardInset),
+                    verticalArrangement = Arrangement.spacedBy(SpaceXs)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        ObstacleDetails(obstacle, modifier = Modifier.weight(1f))
+                        TextButton(onClick = onDone) { Text("Done") }
+                        IconButton(onClick = { onRemoveObstacle(obstacle.id) }) {
+                            Icon(Icons.Default.Delete, contentDescription = "Remove obstacle")
+                        }
                     }
-                    if (selected.targetFace != null) {
-                        TextButton(onClick = { onClearTarget(selected.id) }) { Text("Clear") }
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(SpaceXs),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Face", style = MaterialTheme.typography.labelSmall)
+                        FaceChoices(obstacle, onSetFace)
+                        if (obstacle.targetFace != null) {
+                            IconButton(onClick = { onClearTarget(obstacle.id) }) {
+                                Icon(Icons.Default.Refresh, contentDescription = "Clear selected face")
+                            }
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ObstacleDetails(obstacle: Obstacle, modifier: Modifier = Modifier) {
+    Column(modifier) {
+        Text("Obstacle ${obstacle.id}", fontWeight = FontWeight.SemiBold)
+        Text("(${obstacle.x}, ${obstacle.y})", style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+@Composable
+private fun FaceChoices(obstacle: Obstacle, onSetFace: (String, Face) -> Unit) {
+    Row(horizontalArrangement = Arrangement.spacedBy(SpaceXs)) {
+        Face.entries.forEach { face ->
+            FilterChip(
+                selected = obstacle.targetFace == face,
+                onClick = { onSetFace(obstacle.id, face) },
+                label = { Text(face.code, fontWeight = FontWeight.Bold) }
+            )
+        }
+    }
+}
+
+@Composable
+private fun ArenaSidePanel(state: AppState, modifier: Modifier = Modifier) {
+    val identifiedTargets = state.obstacles.count { it.targetId != null }
+    Card(
+        modifier = modifier,
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
+    ) {
+        Column(
+            modifier = Modifier.padding(CardInset),
+            verticalArrangement = Arrangement.spacedBy(SpaceSm)
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(SpaceXs)) {
+                Text("Live field", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = if (state.connected) SuccessContainer else MaterialTheme.colorScheme.errorContainer
+                ) {
+                    Text(
+                        if (state.connected) "LIVE" else "NO LINK",
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (state.connected) MissionTeal else MaterialTheme.colorScheme.error,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+            HorizontalDivider()
+            ArenaSideMetric("Position", "(${state.robot.x}, ${state.robot.y})")
+            ArenaSideMetric("Heading", state.robot.direction.code)
+            ArenaSideMetric("Obstacles", state.obstacles.size.toString())
+            ArenaSideMetric("Targets", "$identifiedTargets found")
+            HorizontalDivider()
+            Text("Arena guide", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+            ArenaLegendItem(ObstacleBlue, "Blue: obstacle")
+            ArenaLegendItem(TargetAmber, "Gold: target")
+            ArenaLegendItem(RobotGreen, "Green: robot")
+            Text(
+                "Tap to add. Drag to move or remove.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+private fun ArenaSideMetric(label: String, value: String, modifier: Modifier = Modifier) {
+    Column(modifier) {
+        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(value, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
     }
 }
 
@@ -481,9 +956,8 @@ private fun ArenaCanvas(
 
     Canvas(
         modifier = modifier
-            .aspectRatio(MAP_COLUMNS.toFloat() / MAP_ROWS.toFloat())
-            .background(Color(0xFFE8F3F8), RoundedCornerShape(8.dp))
-            .border(1.dp, Color(0xFF7A9AA8), RoundedCornerShape(8.dp))
+            .background(Color(0xFFEAF4F5), RoundedCornerShape(16.dp))
+            .border(1.dp, Color(0xFFA9BEC9), RoundedCornerShape(16.dp))
             .pointerInput(state.obstacles) {
                 detectDragGestures(
                     onDragStart = { offset ->
@@ -523,36 +997,40 @@ private fun ArenaCanvas(
         val cellWidth = size.width / MAP_COLUMNS
         val cellHeight = size.height / MAP_ROWS
 
-        for (x in 0..MAP_COLUMNS) drawLine(Color(0xFFB7D1DB), Offset(x.toFloat() * cellWidth, 0f), Offset(x.toFloat() * cellWidth, size.height), 1f)
-        for (y in 0..MAP_ROWS) drawLine(Color(0xFFB7D1DB), Offset(0f, y.toFloat() * cellHeight), Offset(size.width, y.toFloat() * cellHeight), 1f)
+        for (x in 0..MAP_COLUMNS) drawLine(Color(0xFFD5E3E8), Offset(x.toFloat() * cellWidth, 0f), Offset(x.toFloat() * cellWidth, size.height), 1f)
+        for (y in 0..MAP_ROWS) drawLine(Color(0xFFD5E3E8), Offset(0f, y.toFloat() * cellHeight), Offset(size.width, y.toFloat() * cellHeight), 1f)
 
         state.obstacles.forEach { obstacle ->
             val left = obstacle.x * cellWidth + 2f
             val top = (MAP_ROWS - 1 - obstacle.y) * cellHeight + 2f
-            val fill = if (obstacle.targetId != null) Color(0xFFD29B42) else Color(0xFF417A9D)
-            drawRect(fill, Offset(left, top), Size(cellWidth - 4f, cellHeight - 4f))
-            drawRect(Color.White, Offset(left, top), Size(cellWidth - 4f, cellHeight - 4f), style = Stroke(2f))
+            val obstacleWidth = cellWidth - 4f
+            val obstacleHeight = cellHeight - 4f
+            val right = left + obstacleWidth
+            val bottom = top + obstacleHeight
+            val fill = if (obstacle.targetId != null) TargetAmber else ObstacleBlue
+            drawRect(fill, Offset(left, top), Size(obstacleWidth, obstacleHeight))
+            drawRect(Color.White, Offset(left, top), Size(obstacleWidth, obstacleHeight), style = Stroke(2f))
             obstacle.targetFace?.let { face ->
-                val faceColor = Color(0xFFE33B35)
+                val faceColor = MissionError
                 when (face) {
-                    Face.N -> drawLine(faceColor, Offset(left, top), Offset(left + cellWidth, top), 5f)
-                    Face.S -> drawLine(faceColor, Offset(left, top + cellHeight - 4f), Offset(left + cellWidth, top + cellHeight - 4f), 5f)
-                    Face.W -> drawLine(faceColor, Offset(left, top), Offset(left, top + cellHeight), 5f)
-                    Face.E -> drawLine(faceColor, Offset(left + cellWidth - 4f, top), Offset(left + cellWidth - 4f, top + cellHeight), 5f)
+                    Face.N -> drawLine(faceColor, Offset(left, top), Offset(right, top), 5f)
+                    Face.S -> drawLine(faceColor, Offset(left, bottom), Offset(right, bottom), 5f)
+                    Face.W -> drawLine(faceColor, Offset(left, top), Offset(left, bottom), 5f)
+                    Face.E -> drawLine(faceColor, Offset(right, top), Offset(right, bottom), 5f)
                 }
             }
             drawCenteredText(
                 text = obstacle.targetId ?: obstacle.id.removePrefix("B"),
-                center = Offset(left + cellWidth / 2, top + cellHeight / 2),
+                center = Offset(left + obstacleWidth / 2, top + obstacleHeight / 2),
                 color = Color.White,
-                textSize = if (obstacle.targetId != null) 18f else 11f
+                textSize = cellWidth.coerceAtMost(cellHeight) * if (obstacle.targetId != null) 0.42f else 0.38f
             )
         }
 
         val robotLeft = state.robot.x * cellWidth
         val robotTop = (MAP_ROWS - 1 - state.robot.y) * cellHeight
         val robotCenter = Offset(robotLeft + cellWidth / 2, robotTop + cellHeight / 2)
-        drawCircle(Color(0xFF1B9E77), cellWidth.coerceAtMost(cellHeight) * 0.34f, robotCenter)
+        drawCircle(RobotGreen, cellWidth.coerceAtMost(cellHeight) * 0.34f, robotCenter)
         drawCircle(Color.White, cellWidth.coerceAtMost(cellHeight) * 0.34f, robotCenter, style = Stroke(2f))
         val direction = when (state.robot.direction) {
             Face.N -> Offset(0f, -cellHeight * 0.27f)
@@ -572,7 +1050,7 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCenteredText(
 ) {
     val paint = android.graphics.Paint().apply {
         this.color = color.toArgb()
-        this.textSize = textSize * density
+        this.textSize = textSize
         textAlign = android.graphics.Paint.Align.CENTER
         isAntiAlias = true
         typeface = android.graphics.Typeface.DEFAULT_BOLD
@@ -584,25 +1062,6 @@ private fun gridPoint(offset: Offset, width: Float, height: Float): GridPoint {
     val x = floor(offset.x / (width / MAP_COLUMNS)).toInt()
     val yFromTop = floor(offset.y / (height / MAP_ROWS)).toInt()
     return GridPoint(x, MAP_ROWS - 1 - yFromTop)
-}
-
-@Composable
-private fun StatusCard(messages: List<StatusMessage>) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(12.dp)) {
-            Text("Robot status", fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(6.dp))
-            if (messages.isEmpty()) {
-                Text("No status messages received yet.", style = MaterialTheme.typography.bodySmall)
-            } else {
-                LazyColumn(modifier = Modifier.height(120.dp), reverseLayout = true) {
-                    items(messages.asReversed()) { message ->
-                        Text("${message.time}  ${message.text}", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 2.dp))
-                    }
-                }
-            }
-        }
-    }
 }
 
 @Composable
@@ -640,7 +1099,7 @@ private fun DevicePickerDialog(
                                     Text(deviceName(device), fontWeight = FontWeight.SemiBold)
                                     Text(device.address, style = MaterialTheme.typography.bodySmall)
                                 }
-                                if (connectedAddress == device.address) Text("Connected", color = Color(0xFF197A43), fontSize = 12.sp)
+                                if (connectedAddress == device.address) Text("Connected", color = MissionTeal, fontSize = 12.sp)
                             }
                         }
                     }

@@ -36,12 +36,7 @@ data class AppState(
     val selectedObstacleId: String? = null,
     val robot: RobotState = RobotState(),
     val statusMessages: List<StatusMessage> = emptyList(),
-    /**
-     * History of every raw line received over Bluetooth, whatever it is. This exists to prove C.1
-     * bidirectional text transfer (e.g. with the AMD Tool) and is shown in its own scrollable
-     * window on the Control tab, kept separate from the curated [statusMessages] feed so it never
-     * becomes the "complete raw stream" that C.4 forbids in that selective display.
-     */
+    /** Raw Bluetooth input, rendered with the curated status feed in the single activity log. */
     val receivedRawLog: List<StatusMessage> = emptyList()
 )
 
@@ -50,6 +45,11 @@ class BluetoothController(private val context: Context) {
     companion object {
         private val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
         private const val RECONNECT_DELAY_MS = 3_000L
+        private const val MAX_RECONNECT_DELAY_MS = 30_000L
+        private const val CONNECT_TIMEOUT_MS = 12_000L
+        private const val SCAN_TIMEOUT_MS = 18_000L
+        private const val SERVER_RETRY_DELAY_MS = 5_000L
+        private const val INCOMING_IDLE_FLUSH_MS = 100L
         private const val SERVICE_NAME = "MDPAndroid"
     }
 
@@ -58,14 +58,24 @@ class BluetoothController(private val context: Context) {
     private val writeExecutor = Executors.newSingleThreadExecutor()
     private val adapter: BluetoothAdapter? =
         (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
+    private val socketLock = Any()
     private var socket: BluetoothSocket? = null
     private var output: OutputStream? = null
+    private var pendingSocket: BluetoothSocket? = null
+    private var connectionAttemptId = 0L
+    private var activeSessionId = 0L
+    private var connectTimeoutRunnable: Runnable? = null
     private var lastDevice: BluetoothDevice? = null
     private var reconnectRunnable: Runnable? = null
-    private var closed = false
+    @Volatile private var closed = false
     private var registered = false
     private var serverSocket: BluetoothServerSocket? = null
-    private var listening = false
+    @Volatile private var listening = false
+    private var scanTimeoutRunnable: Runnable? = null
+    private var reconnectAttempt = 0
+    private val incomingBuffer = StringBuilder()
+    private var incomingFlushRunnable: Runnable? = null
+    private var nextLogOrder = 0L
 
     var state by mutableStateOf(AppState())
         private set
@@ -73,13 +83,15 @@ class BluetoothController(private val context: Context) {
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
+                BluetoothAdapter.ACTION_DISCOVERY_STARTED -> {
+                    state = state.copy(scanning = true)
+                }
                 BluetoothDevice.ACTION_FOUND -> {
                     val device = intent.parcelableBluetoothDevice() ?: return
                     addDevice(device)
                 }
                 BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> {
-                    state = state.copy(scanning = false)
-                    addStatus("Bluetooth scan complete")
+                    finishScan("Bluetooth scan complete")
                 }
             }
         }
@@ -118,9 +130,25 @@ class BluetoothController(private val context: Context) {
                 return
             }
             if (bluetoothAdapter.isDiscovering) bluetoothAdapter.cancelDiscovery()
+            cancelScanTimeout()
+            val paired = bluetoothAdapter.bondedDevices.orEmpty().map(::toInfo)
             state = state.copy(scanning = true, connectionDetail = "Scanning for nearby devices...")
-            bluetoothAdapter.startDiscovery()
+            if (!bluetoothAdapter.startDiscovery()) {
+                finishScan("Bluetooth could not start scanning")
+                return
+            }
+            val timeout = Runnable {
+                if (state.scanning) {
+                    try { bluetoothAdapter.cancelDiscovery() } catch (_: SecurityException) { }
+                    finishScan("Bluetooth scan timed out")
+                }
+            }
+            scanTimeoutRunnable = timeout
+            mainHandler.postDelayed(timeout, SCAN_TIMEOUT_MS)
+            // A new scan should not keep stale, previously-discovered unpaired devices visible.
+            state = state.copy(devices = mergeDevices(paired))
         } catch (_: SecurityException) {
+            finishScan("Bluetooth permission denied")
             addStatus("Bluetooth permission denied")
         }
     }
@@ -134,6 +162,10 @@ class BluetoothController(private val context: Context) {
         if (state.obstacles.any { it.id == id }) state = state.copy(selectedObstacleId = id)
     }
 
+    fun clearObstacleSelection() {
+        state = state.copy(selectedObstacleId = null)
+    }
+
     @SuppressLint("MissingPermission")
     fun connect(deviceInfo: BluetoothDeviceInfo) {
         if (!hasBluetoothPermission()) {
@@ -145,9 +177,15 @@ class BluetoothController(private val context: Context) {
             addStatus("Could not find ${deviceInfo.address}")
             return
         }
+        val attemptId = synchronized(socketLock) {
+            connectionAttemptId += 1
+            activeSessionId += 1 // Invalidate any old read/write callbacks.
+            closeCurrentSocketsLocked()
+            connectionAttemptId
+        }
         lastDevice = bluetoothDevice
+        cancelConnectTimeout()
         cancelReconnect()
-        closeSocket()
         state = state.copy(
             selectedDevice = deviceInfo,
             selectedDeviceName = deviceInfo.name ?: deviceInfo.address,
@@ -160,23 +198,28 @@ class BluetoothController(private val context: Context) {
 
         connectionExecutor.execute {
             try {
-                val newSocket = openSocket(bluetoothDevice)
-                beginSession(newSocket, deviceInfo)
+                val newSocket = openSocket(bluetoothDevice, attemptId)
+                val sessionId = synchronized(socketLock) {
+                    if (closed || connectionAttemptId != attemptId || pendingSocket !== newSocket) {
+                        null
+                    } else {
+                        pendingSocket = null
+                        activeSessionId += 1
+                        socket = newSocket
+                        output = newSocket.outputStream
+                        activeSessionId
+                    }
+                }
+                if (sessionId == null) {
+                    try { newSocket.close() } catch (_: IOException) { }
+                    return@execute
+                }
+                cancelConnectTimeout()
+                beginSession(newSocket, deviceInfo, sessionId)
             } catch (error: IOException) {
-                mainHandler.post {
-                    state = state.copy(
-                        connected = false,
-                        connectionStatus = "Disconnected",
-                        connectionDetail = "Connection failed: ${error.message ?: "device unavailable"}"
-                    )
-                    addStatus("Connection failed; retrying automatically")
-                    scheduleReconnect()
-                }
+                handleConnectionFailure(attemptId, "Connection failed: ${error.message ?: "device unavailable"}")
             } catch (_: SecurityException) {
-                mainHandler.post {
-                    addStatus("Bluetooth permission denied")
-                    state = state.copy(connectionStatus = "Disconnected", connectionDetail = "Bluetooth permission denied")
-                }
+                handleConnectionFailure(attemptId, "Bluetooth permission denied", retry = false)
             }
         }
     }
@@ -211,15 +254,31 @@ class BluetoothController(private val context: Context) {
             serverSocket = server
             while (!closed) {
                 val accepted = try { server.accept() } catch (_: IOException) { null } ?: break
-                if (state.connected) {
+                val sessionId = synchronized(socketLock) {
+                    if (closed || socket != null) {
+                        null
+                    } else {
+                        // An AMD Tool reconnect must win over a slow outgoing retry. Cancelling the
+                        // pending client socket lets the app continue to accept its server-side flow.
+                        connectionAttemptId += 1
+                        try { pendingSocket?.close() } catch (_: IOException) { }
+                        pendingSocket = null
+                        activeSessionId += 1
+                        socket = accepted
+                        output = accepted.outputStream
+                        activeSessionId
+                    }
+                }
+                if (sessionId == null) {
                     try { accepted.close() } catch (_: IOException) { }
                     continue
                 }
                 val info = try { toInfo(accepted.remoteDevice) } catch (_: SecurityException) {
                     BluetoothDeviceInfo(accepted.remoteDevice.address, null)
                 }
+                cancelConnectTimeout()
                 cancelReconnect()
-                beginSession(accepted, info)
+                beginSession(accepted, info, sessionId)
             }
         } catch (_: SecurityException) {
             // Permission revoked mid-listen; stop quietly, startServerListening() can retry later.
@@ -227,15 +286,19 @@ class BluetoothController(private val context: Context) {
             try { serverSocket?.close() } catch (_: IOException) { }
             serverSocket = null
             listening = false
+            if (!closed && hasBluetoothPermission()) {
+                mainHandler.postDelayed({ startServerListening() }, SERVER_RETRY_DELAY_MS)
+            }
         }
     }
 
     /** Shared success path for a connection established either by dialing out or by accepting an incoming one. */
-    private fun beginSession(newSocket: BluetoothSocket, deviceInfo: BluetoothDeviceInfo) {
+    private fun beginSession(newSocket: BluetoothSocket, deviceInfo: BluetoothDeviceInfo, sessionId: Long) {
         lastDevice = newSocket.remoteDevice
-        socket = newSocket
-        output = newSocket.outputStream
+        reconnectAttempt = 0
+        mainHandler.post { resetIncomingBuffer() }
         mainHandler.post {
+            if (!isCurrentSession(sessionId, newSocket)) return@post
             state = state.copy(
                 selectedDevice = deviceInfo,
                 selectedDeviceName = deviceInfo.name ?: deviceInfo.address,
@@ -246,13 +309,19 @@ class BluetoothController(private val context: Context) {
             )
             addStatus("Bluetooth connection established")
         }
-        readLoop(newSocket)
+        readLoop(newSocket, sessionId)
     }
 
     fun disconnect() {
         cancelReconnect()
+        cancelConnectTimeout()
         lastDevice = null
-        closeSocket()
+        synchronized(socketLock) {
+            connectionAttemptId += 1
+            activeSessionId += 1
+            closeCurrentSocketsLocked()
+        }
+        mainHandler.post { resetIncomingBuffer() }
         state = state.copy(
             connected = false,
             connectedAddress = null,
@@ -277,8 +346,11 @@ class BluetoothController(private val context: Context) {
      * terminator explicitly.
      */
     fun send(command: String, appendLineTerminator: Boolean = false) {
-        val currentOutput = output
-        if (!state.connected || currentOutput == null) {
+        val connection = synchronized(socketLock) { Triple(socket, output, activeSessionId) }
+        val currentSocket = connection.first
+        val currentOutput = connection.second
+        val sessionId = connection.third
+        if (!state.connected || currentSocket == null || currentOutput == null) {
             addStatus("Not connected; command not sent: $command")
             return
         }
@@ -289,7 +361,7 @@ class BluetoothController(private val context: Context) {
                 currentOutput.flush()
                 mainHandler.post { addStatus("Sent: $command") }
             } catch (_: IOException) {
-                mainHandler.post { markConnectionLost("Connection lost while sending") }
+                mainHandler.post { markConnectionLost("Connection lost while sending", sessionId, currentSocket) }
             }
         }
     }
@@ -327,18 +399,22 @@ class BluetoothController(private val context: Context) {
     }
 
     fun clearObstacleTarget(id: String) {
-        state = state.copy(obstacles = state.obstacles.map { if (it.id == id) it.copy(targetFace = null, targetId = null) else it })
-        addStatus("Cleared target annotation for $id")
+        state = state.copy(obstacles = clearObstacleFace(state.obstacles, id))
+        addStatus("Cleared selected face for $id")
     }
 
     fun addStatus(message: String) {
-        val timestamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())
-        state = state.copy(statusMessages = (state.statusMessages + StatusMessage(timestamp, message)).takeLast(40))
+        state = state.copy(statusMessages = (state.statusMessages + newLogMessage(message)).takeLast(40))
     }
 
     private fun addRawReceived(line: String) {
+        state = state.copy(receivedRawLog = (state.receivedRawLog + newLogMessage(line)).takeLast(100))
+    }
+
+    private fun newLogMessage(text: String): StatusMessage {
         val timestamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())
-        state = state.copy(receivedRawLog = (state.receivedRawLog + StatusMessage(timestamp, line)).takeLast(100))
+        nextLogOrder += 1
+        return StatusMessage(timestamp, text, nextLogOrder)
     }
 
     fun deviceName(info: BluetoothDeviceInfo): String = info.name ?: info.address
@@ -346,7 +422,14 @@ class BluetoothController(private val context: Context) {
     fun close() {
         closed = true
         cancelReconnect()
-        closeSocket()
+        cancelScanTimeout()
+        cancelConnectTimeout()
+        synchronized(socketLock) {
+            connectionAttemptId += 1
+            activeSessionId += 1
+            closeCurrentSocketsLocked()
+        }
+        mainHandler.post { resetIncomingBuffer() }
         try { serverSocket?.close() } catch (_: IOException) { }
         if (registered) {
             try { context.unregisterReceiver(receiver) } catch (_: IllegalArgumentException) { }
@@ -363,17 +446,27 @@ class BluetoothController(private val context: Context) {
      * most community Bluetooth SPP clients use for exactly this case.
      */
     @SuppressLint("MissingPermission")
-    private fun openSocket(device: BluetoothDevice): BluetoothSocket {
+    private fun openSocket(device: BluetoothDevice, attemptId: Long): BluetoothSocket {
+        val standardSocket = device.createRfcommSocketToServiceRecord(SPP_UUID)
+        setPendingSocket(standardSocket, attemptId)
+        armConnectTimeout(attemptId)
         return try {
-            device.createRfcommSocketToServiceRecord(SPP_UUID).also { it.connect() }
+            standardSocket.connect()
+            standardSocket
         } catch (standardError: IOException) {
+            try { standardSocket.close() } catch (_: IOException) { }
             try {
-                (device.javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
+                val fallback = (device.javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
                     .invoke(device, 1) as BluetoothSocket)
-                    .also { it.connect() }
+                setPendingSocket(fallback, attemptId)
+                fallback.connect()
+                fallback
             } catch (_: Exception) {
                 throw standardError
             }
+        } catch (error: Exception) {
+            try { standardSocket.close() } catch (_: IOException) { }
+            throw IOException("Unable to open Bluetooth socket", error)
         }
     }
 
@@ -382,9 +475,11 @@ class BluetoothController(private val context: Context) {
      * a strict [BufferedReader.readLine] block forever waiting for a delimiter that never arrives.
      * Read whatever bytes are available instead: split on newlines when present (so a
      * newline-terminated protocol still works and multiple messages in one packet are separated),
-     * and treat a chunk with no newline as one complete message on its own.
+     * and flush a non-terminated message after a short idle period. The idle period prevents a
+     * message split across multiple Bluetooth packets from being parsed and discarded halfway
+     * through.
      */
-    private fun readLoop(connectedSocket: BluetoothSocket) {
+    private fun readLoop(connectedSocket: BluetoothSocket, sessionId: Long) {
         val buffer = ByteArray(1024)
         try {
             val input = connectedSocket.inputStream
@@ -392,54 +487,69 @@ class BluetoothController(private val context: Context) {
                 val bytesRead = input.read(buffer)
                 if (bytesRead == -1) break
                 val chunk = String(buffer, 0, bytesRead, Charsets.UTF_8)
-                chunk.split('\n', '\r')
-                    .map { it.trim() }
-                    .filter { it.isNotEmpty() }
-                    .forEach { line -> mainHandler.post { parseIncoming(line) } }
+                mainHandler.post {
+                    if (isCurrentSession(sessionId, connectedSocket)) consumeIncomingChunk(chunk)
+                }
             }
         } catch (_: IOException) {
             // EOF and read errors both become a reconnect event below.
         } finally {
-            mainHandler.post { markConnectionLost("Bluetooth device disconnected") }
+            mainHandler.post {
+                if (isCurrentSession(sessionId, connectedSocket)) {
+                    flushIncomingBuffer()
+                    markConnectionLost("Bluetooth device disconnected", sessionId, connectedSocket)
+                }
+            }
         }
     }
 
     private fun parseIncoming(line: String) {
         addRawReceived(line)
-        val parts = line.split(",").map { it.trim().removePrefix("[").removeSuffix("]") }
-        when (parts.firstOrNull()?.uppercase()) {
-            "MSG" -> parts.drop(1).joinToString(",").takeIf { it.isNotBlank() }?.let(::addStatus)
-            "TARGET" -> {
-                val id = parts.getOrNull(1)?.let(::canonicalObstacleId) ?: return
-                val target = parts.getOrNull(2) ?: return
-                val face = parts.getOrNull(3)?.let { code -> Face.values().firstOrNull { it.code == code.uppercase() } }
-                state = state.copy(obstacles = state.obstacles.map { obstacle ->
-                    if (obstacle.id.equals(id, ignoreCase = true)) obstacle.copy(targetId = target, targetFace = face ?: obstacle.targetFace) else obstacle
-                })
-                addStatus("Target $target received for $id")
-            }
-            "ROBOT" -> {
-                val x = parts.getOrNull(1)?.toIntOrNull() ?: return
-                val y = parts.getOrNull(2)?.toIntOrNull() ?: return
-                val direction = parts.getOrNull(3)?.uppercase()?.let { code -> Face.values().firstOrNull { it.code == code } } ?: return
-                state = state.copy(robot = RobotState(x, y, direction))
-                addStatus("Robot updated: ($x,$y) facing ${direction.code}")
-            }
-            // No status entry here by design: C.4 requires the status feed to stay selective, not
-            // a dump of everything received. The raw text is still visible via lastReceivedRaw.
-            else -> {}
+        when (val message = parseProtocolMessage(line)) {
+            is ProtocolMessage.Text -> addStatus(message.text)
+            is ProtocolMessage.Target -> state = state.copy(obstacles = applyTargetRecognition(state.obstacles, message))
+            is ProtocolMessage.Robot -> state = state.copy(robot = RobotState(message.x, message.y, message.direction))
+            null -> Unit
         }
     }
 
-    /** Accept the checklist's numeric obstacle number and the ARCM slide's B-prefixed form. */
-    private fun canonicalObstacleId(rawId: String): String {
-        val cleaned = rawId.trim().uppercase()
-        return if (cleaned.startsWith("B")) cleaned else "B$cleaned"
+    private fun handleConnectionFailure(attemptId: Long, detail: String, retry: Boolean = true) {
+        mainHandler.post {
+            val relevant = synchronized(socketLock) {
+                connectionAttemptId == attemptId && socket == null
+            }
+            if (!relevant || closed) return@post
+            synchronized(socketLock) {
+                connectionAttemptId += 1
+                activeSessionId += 1
+                closeCurrentSocketsLocked()
+            }
+            cancelConnectTimeout()
+            state = state.copy(
+                connected = false,
+                connectedAddress = null,
+                connectionStatus = "Disconnected",
+                connectionDetail = detail
+            )
+            addStatus(detail)
+            if (retry) {
+                addStatus("Retrying Bluetooth connection automatically")
+                scheduleReconnect()
+            }
+        }
     }
 
-    private fun markConnectionLost(detail: String) {
-        if (!state.connected && state.connectionStatus == "Disconnected") return
-        closeSocket()
+    private fun markConnectionLost(detail: String, sessionId: Long, expectedSocket: BluetoothSocket) {
+        val relevant = synchronized(socketLock) {
+            if (activeSessionId != sessionId || socket !== expectedSocket) {
+                false
+            } else {
+                activeSessionId += 1
+                closeCurrentSocketsLocked()
+                true
+            }
+        }
+        if (!relevant || closed) return
         state = state.copy(connected = false, connectedAddress = null, connectionStatus = "Disconnected", connectionDetail = detail)
         addStatus(detail)
         scheduleReconnect()
@@ -455,8 +565,11 @@ class BluetoothController(private val context: Context) {
                 connect(state.selectedDevice ?: toInfo(device))
             }
         }
+        reconnectAttempt += 1
+        val backoffMultiplier = 1L shl (reconnectAttempt - 1).coerceAtMost(3)
+        val delay = (RECONNECT_DELAY_MS * backoffMultiplier).coerceAtMost(MAX_RECONNECT_DELAY_MS)
         reconnectRunnable = retry
-        mainHandler.postDelayed(retry, RECONNECT_DELAY_MS)
+        mainHandler.postDelayed(retry, delay)
     }
 
     private fun cancelReconnect() {
@@ -464,15 +577,102 @@ class BluetoothController(private val context: Context) {
         reconnectRunnable = null
     }
 
-    private fun closeSocket() {
+    private fun closeCurrentSocketsLocked() {
+        try { pendingSocket?.close() } catch (_: IOException) { }
         try { socket?.close() } catch (_: IOException) { }
+        pendingSocket = null
         socket = null
         output = null
+    }
+
+    private fun setPendingSocket(candidate: BluetoothSocket, attemptId: Long) {
+        val accepted = synchronized(socketLock) {
+            if (closed || connectionAttemptId != attemptId) {
+                false
+            } else {
+                try { pendingSocket?.close() } catch (_: IOException) { }
+                pendingSocket = candidate
+                true
+            }
+        }
+        if (!accepted) {
+            try { candidate.close() } catch (_: IOException) { }
+            throw IOException("Bluetooth connection attempt was superseded")
+        }
+    }
+
+    private fun armConnectTimeout(attemptId: Long) {
+        cancelConnectTimeout()
+        val timeout = Runnable {
+            val pending = synchronized(socketLock) {
+                connectionAttemptId == attemptId && pendingSocket != null
+            }
+            if (pending) handleConnectionFailure(attemptId, "Bluetooth connection timed out")
+        }
+        connectTimeoutRunnable = timeout
+        mainHandler.postDelayed(timeout, CONNECT_TIMEOUT_MS)
+    }
+
+    private fun cancelConnectTimeout() {
+        connectTimeoutRunnable?.let(mainHandler::removeCallbacks)
+        connectTimeoutRunnable = null
+    }
+
+    private fun finishScan(message: String) {
+        cancelScanTimeout()
+        if (state.scanning) state = state.copy(scanning = false)
+        addStatus(message)
+    }
+
+    private fun cancelScanTimeout() {
+        scanTimeoutRunnable?.let(mainHandler::removeCallbacks)
+        scanTimeoutRunnable = null
+    }
+
+    private fun isCurrentSession(sessionId: Long, expectedSocket: BluetoothSocket): Boolean =
+        synchronized(socketLock) { activeSessionId == sessionId && socket === expectedSocket }
+
+    private fun consumeIncomingChunk(chunk: String) {
+        incomingBuffer.append(chunk)
+        while (true) {
+            var delimiterIndex = -1
+            for (index in 0 until incomingBuffer.length) {
+                if (incomingBuffer[index] == '\n' || incomingBuffer[index] == '\r') {
+                    delimiterIndex = index
+                    break
+                }
+            }
+            if (delimiterIndex < 0) break
+            incomingBuffer.substring(0, delimiterIndex).trim().takeIf { it.isNotEmpty() }?.let(::parseIncoming)
+            incomingBuffer.delete(0, delimiterIndex + 1)
+            while (incomingBuffer.isNotEmpty() && (incomingBuffer[0] == '\n' || incomingBuffer[0] == '\r')) {
+                incomingBuffer.deleteCharAt(0)
+            }
+        }
+        if (incomingBuffer.isNotEmpty()) {
+            incomingFlushRunnable?.let(mainHandler::removeCallbacks)
+            val flush = Runnable { flushIncomingBuffer() }
+            incomingFlushRunnable = flush
+            mainHandler.postDelayed(flush, INCOMING_IDLE_FLUSH_MS)
+        }
+    }
+
+    private fun flushIncomingBuffer() {
+        incomingFlushRunnable = null
+        incomingBuffer.toString().trim().takeIf { it.isNotEmpty() }?.let(::parseIncoming)
+        incomingBuffer.clear()
+    }
+
+    private fun resetIncomingBuffer() {
+        incomingFlushRunnable?.let(mainHandler::removeCallbacks)
+        incomingFlushRunnable = null
+        incomingBuffer.clear()
     }
 
     private fun registerReceiver() {
         if (registered) return
         val filter = IntentFilter().apply {
+            addAction(BluetoothAdapter.ACTION_DISCOVERY_STARTED)
             addAction(BluetoothDevice.ACTION_FOUND)
             addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
         }
