@@ -10,8 +10,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -78,6 +78,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -105,11 +106,13 @@ class MainActivity : ComponentActivity() {
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) {
+    ) { result ->
         bluetoothController.refreshDevices()
-        if (it.values.all { granted -> granted }) {
+        if (result.values.all { granted -> granted }) {
             bluetoothController.startScan()
             bluetoothController.startServerListening()
+        } else {
+            bluetoothController.addStatus("Bluetooth permission is required before scanning")
         }
     }
 
@@ -246,7 +249,14 @@ private fun ARCMApp(
             AppTab.CONTROLS -> ScreenColumn(padding) {
                 ControlAvailabilityCard(enabled = demoMode || state.connected, demoMode = demoMode)
                 ControlCard(enabled = demoMode || state.connected, onCommand = onCommand)
-                AssessmentCommandCard(enabled = demoMode || state.connected, onCommand = onCommand)
+                AssessmentCommandCard(
+                    enabled = demoMode || state.connected,
+                    onCommand = onCommand,
+                    onSendArena = {
+                        if (demoMode) controller.addStatus("Demo arena sync prepared")
+                        else controller.sendArenaSnapshot()
+                    }
+                )
                 RobotActivityCard(
                     statusMessages = state.statusMessages,
                     receivedRawMessages = state.receivedRawLog
@@ -703,7 +713,11 @@ private fun DriveCommandButton(
 }
 
 @Composable
-private fun AssessmentCommandCard(enabled: Boolean, onCommand: (String) -> Unit) {
+private fun AssessmentCommandCard(
+    enabled: Boolean,
+    onCommand: (String) -> Unit,
+    onSendArena: () -> Unit
+) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(20.dp),
@@ -724,7 +738,7 @@ private fun AssessmentCommandCard(enabled: Boolean, onCommand: (String) -> Unit)
                     Text("Task 2\nFastest path")
                 }
             }
-            OutlinedButton(onClick = { onCommand("sendArena") }, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
+            OutlinedButton(onClick = onSendArena, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
                 Text("Send current arena to robot")
             }
         }
@@ -951,45 +965,38 @@ private fun ArenaCanvas(
     onSelectObstacle: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var dragId by remember { mutableStateOf<String?>(null) }
-    var dragPoint by remember { mutableStateOf<GridPoint?>(null) }
-
     Canvas(
         modifier = modifier
             .background(Color(0xFFEAF4F5), RoundedCornerShape(16.dp))
             .border(1.dp, Color(0xFFA9BEC9), RoundedCornerShape(16.dp))
             .pointerInput(state.obstacles) {
-                detectDragGestures(
-                    onDragStart = { offset ->
-                        val point = gridPoint(offset, size.width.toFloat(), size.height.toFloat())
-                        dragId = state.obstacles.firstOrNull { it.x == point.x && it.y == point.y }?.id
-                        dragPoint = point
-                    },
-                    onDrag = { change, _ ->
-                        change.consume()
-                        dragPoint = gridPoint(change.position, size.width.toFloat(), size.height.toFloat())
-                    },
-                    onDragEnd = {
-                        val id = dragId
-                        val point = dragPoint
-                        if (id != null && point != null) onMoveObstacle(id, point.x, point.y)
-                        dragId = null
-                        dragPoint = null
-                    },
-                    onDragCancel = {
-                        dragId = null
-                        dragPoint = null
+                awaitEachGesture {
+                    val down = awaitFirstDown()
+                    val start = down.position
+                    val startPoint = gridPoint(start, size.width.toFloat(), size.height.toFloat())
+                    val obstacleId = state.obstacles.firstOrNull { it.x == startPoint.x && it.y == startPoint.y }?.id
+                    var current = start
+                    var moved = false
+
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                        if (change.positionChanged()) {
+                            change.consume()
+                            current = change.position
+                            moved = true
+                        }
+                        if (!change.pressed) break
                     }
-                )
-            }
-            .pointerInput(state.obstacles) {
-                detectTapGestures { offset ->
-                    val point = gridPoint(offset, size.width.toFloat(), size.height.toFloat())
-                    val obstacle = state.obstacles.firstOrNull { it.x == point.x && it.y == point.y }
-                    if (obstacle != null) {
-                        onSelectObstacle(obstacle.id)
-                    } else if (point.x in 0 until MAP_COLUMNS && point.y in 0 until MAP_ROWS) {
-                        onAddObstacle(point)
+
+                    val releasedAt = gridPoint(current, size.width.toFloat(), size.height.toFloat())
+                    if (!moved || (current - start).getDistance() < 6.dp.toPx()) {
+                        when {
+                            obstacleId != null -> onSelectObstacle(obstacleId)
+                            startPoint.x in 0 until MAP_COLUMNS && startPoint.y in 0 until MAP_ROWS -> onAddObstacle(startPoint)
+                        }
+                    } else if (obstacleId != null) {
+                        onMoveObstacle(obstacleId, releasedAt.x, releasedAt.y)
                     }
                 }
             }

@@ -403,6 +403,18 @@ class BluetoothController(private val context: Context) {
         addStatus("Cleared selected face for $id")
     }
 
+    /** Sends the current arena layout as the same ADD, FACE, and ROBOT messages used live. */
+    fun sendArenaSnapshot() {
+        state.obstacles.forEach { obstacle ->
+            send("ADD,${obstacle.id},(${obstacle.x},${obstacle.y})")
+            obstacle.targetFace?.let { face ->
+                send("FACE,${obstacle.id},${face.code},(${obstacle.x},${obstacle.y})")
+            }
+        }
+        send("ROBOT,${state.robot.x},${state.robot.y},${state.robot.direction.code}")
+        addStatus("Arena setup sent (${state.obstacles.size} obstacle(s))")
+    }
+
     fun addStatus(message: String) {
         state = state.copy(statusMessages = (state.statusMessages + newLogMessage(message)).takeLast(40))
     }
@@ -505,12 +517,57 @@ class BluetoothController(private val context: Context) {
 
     private fun parseIncoming(line: String) {
         addRawReceived(line)
-        when (val message = parseProtocolMessage(line)) {
-            is ProtocolMessage.Text -> addStatus(message.text)
-            is ProtocolMessage.Target -> state = state.copy(obstacles = applyTargetRecognition(state.obstacles, message))
-            is ProtocolMessage.Robot -> state = state.copy(robot = RobotState(message.x, message.y, message.direction))
-            null -> Unit
+        val parts = line.split(",").map { it.trim().removePrefix("[").removeSuffix("]") }
+        when (parts.firstOrNull()?.uppercase()) {
+            "ADD" -> {
+                val id = parts.getOrNull(1)?.let(::canonicalObstacleId) ?: return
+                val point = parseCoordinateFrom(line) ?: return
+                upsertRemoteObstacle(id, point)
+            }
+            "SUB" -> {
+                val id = parts.getOrNull(1)?.let(::canonicalObstacleId) ?: return
+                if (state.obstacles.any { it.id.equals(id, ignoreCase = true) }) {
+                    state = state.copy(obstacles = state.obstacles.filterNot { it.id.equals(id, ignoreCase = true) })
+                    addStatus("$id removed (from remote)")
+                }
+            }
+            "FACE" -> {
+                val id = parts.getOrNull(1)?.let(::canonicalObstacleId) ?: return
+                val face = parts.getOrNull(2)?.uppercase()?.let { code -> Face.entries.firstOrNull { it.code == code } } ?: return
+                if (state.obstacles.any { it.id.equals(id, ignoreCase = true) }) {
+                    state = state.copy(obstacles = state.obstacles.map {
+                        if (it.id.equals(id, ignoreCase = true)) it.copy(targetFace = face) else it
+                    })
+                    addStatus("$id face ${face.code} set (from remote)")
+                }
+            }
+            else -> when (val message = parseProtocolMessage(line)) {
+                is ProtocolMessage.Text -> addStatus(message.text)
+                is ProtocolMessage.Target -> state = state.copy(obstacles = applyTargetRecognition(state.obstacles, message))
+                is ProtocolMessage.Robot -> state = state.copy(robot = RobotState(message.x, message.y, message.direction))
+                null -> Unit
+            }
         }
+    }
+
+    private fun parseCoordinateFrom(line: String): GridPoint? {
+        val match = Regex("\\((-?\\d+)\\s*,\\s*(-?\\d+)\\)").find(line) ?: return null
+        val x = match.groupValues[1].toIntOrNull() ?: return null
+        val y = match.groupValues[2].toIntOrNull() ?: return null
+        return GridPoint(x, y)
+    }
+
+    private fun upsertRemoteObstacle(id: String, point: GridPoint) {
+        if (point.x !in 0 until MAP_COLUMNS || point.y !in 0 until MAP_ROWS) return
+        val exists = state.obstacles.any { it.id.equals(id, ignoreCase = true) }
+        state = if (exists) {
+            state.copy(obstacles = state.obstacles.map {
+                if (it.id.equals(id, ignoreCase = true)) it.copy(x = point.x, y = point.y) else it
+            })
+        } else {
+            state.copy(obstacles = state.obstacles + Obstacle(id, point.x, point.y))
+        }
+        addStatus("$id placed at (${point.x},${point.y}) (from remote)")
     }
 
     private fun handleConnectionFailure(attemptId: Long, detail: String, retry: Boolean = true) {
