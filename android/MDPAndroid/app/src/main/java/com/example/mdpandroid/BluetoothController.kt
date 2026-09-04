@@ -344,6 +344,42 @@ class BluetoothController(private val context: Context) {
         addStatus("Cleared target annotation for $id")
     }
 
+    /**
+     * Sends the whole current arena (every obstacle's position and, where set, its target face,
+     * plus the robot's current position/facing) as a batch of the app's existing `ADD`/`FACE`/
+     * `ROBOT` lines, so the remote side can replicate the layout in one shot instead of replaying
+     * every past touch interaction.
+     */
+    fun sendArenaSnapshot() {
+        if (state.obstacles.isEmpty()) {
+            addStatus("No obstacles to send")
+        }
+        state.obstacles.forEach { obstacle ->
+            send("ADD,${obstacle.id},(${obstacle.x},${obstacle.y})")
+            obstacle.targetFace?.let { face -> send("FACE,${obstacle.id},${face.code},(${obstacle.x},${obstacle.y})") }
+        }
+        send("ROBOT,${state.robot.x},${state.robot.y},${state.robot.direction.code}")
+        addStatus("Arena setup sent (${state.obstacles.size} obstacle(s))")
+    }
+
+    /** Sets the robot's starting grid position (keeping its current facing) and informs the remote side. */
+    fun setRobotStart(x: Int, y: Int) {
+        val clampedX = x.coerceIn(0, MAP_COLUMNS - 1)
+        val clampedY = y.coerceIn(0, MAP_ROWS - 1)
+        val direction = state.robot.direction
+        state = state.copy(robot = RobotState(clampedX, clampedY, direction))
+        send("ROBOT,$clampedX,$clampedY,${direction.code}")
+        addStatus("Robot start set to ($clampedX,$clampedY)")
+    }
+
+    /** Sets the robot's facing direction in place (e.g. from a drag-to-face gesture on the map) and informs the remote side. */
+    fun setRobotFace(face: Face) {
+        val robot = state.robot.copy(direction = face)
+        state = state.copy(robot = robot)
+        send("ROBOT,${robot.x},${robot.y},${face.code}")
+        addStatus("Robot facing set to ${face.code}")
+    }
+
     fun addStatus(message: String) {
         val timestamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())
         state = state.copy(statusMessages = (state.statusMessages + StatusMessage(timestamp, message)).takeLast(40))
@@ -432,16 +468,59 @@ class BluetoothController(private val context: Context) {
                 addStatus("Target $target received for $id")
             }
             "ROBOT" -> {
-                val x = parts.getOrNull(1)?.toIntOrNull() ?: return
-                val y = parts.getOrNull(2)?.toIntOrNull() ?: return
+                val x = parts.getOrNull(1)?.toIntOrNull()?.coerceIn(0, MAP_COLUMNS - 1) ?: return
+                val y = parts.getOrNull(2)?.toIntOrNull()?.coerceIn(0, MAP_ROWS - 1) ?: return
                 val direction = parts.getOrNull(3)?.uppercase()?.let { code -> Face.values().firstOrNull { it.code == code } } ?: return
                 state = state.copy(robot = RobotState(x, y, direction))
                 addStatus("Robot updated: ($x,$y) facing ${direction.code}")
+            }
+            "ADD" -> {
+                val id = parts.getOrNull(1) ?: return
+                val point = parseCoordinateFrom(line) ?: return
+                upsertRemoteObstacle(id, point.x, point.y)
+            }
+            "SUB" -> {
+                val id = parts.getOrNull(1) ?: return
+                if (state.obstacles.none { it.id.equals(id, ignoreCase = true) }) return
+                state = state.copy(obstacles = state.obstacles.filterNot { it.id.equals(id, ignoreCase = true) })
+                addStatus("$id removed (from remote)")
+            }
+            "FACE" -> {
+                val id = parts.getOrNull(1) ?: return
+                val faceCode = parts.getOrNull(2) ?: return
+                val face = Face.values().firstOrNull { it.code == faceCode.uppercase() } ?: return
+                if (state.obstacles.none { it.id.equals(id, ignoreCase = true) }) return
+                state = state.copy(obstacles = state.obstacles.map {
+                    if (it.id.equals(id, ignoreCase = true)) it.copy(targetFace = face) else it
+                })
+                addStatus("$id face ${face.code} set (from remote)")
             }
             // No status entry here by design: C.4 requires the status feed to stay selective, not
             // a dump of everything received. The raw text is still visible via lastReceivedRaw.
             else -> {}
         }
+    }
+
+    /**
+     * `line.split(",")` breaks a `(x,y)` coordinate into two parts, so `ADD`/`FACE` read the
+     * coordinate straight out of the raw line with a regex instead of relying on the naive split.
+     */
+    private fun parseCoordinateFrom(line: String): GridPoint? {
+        val match = Regex("\\((-?\\d+)\\s*,\\s*(-?\\d+)\\)").find(line) ?: return null
+        val x = match.groupValues[1].toIntOrNull() ?: return null
+        val y = match.groupValues[2].toIntOrNull() ?: return null
+        return GridPoint(x, y)
+    }
+
+    private fun upsertRemoteObstacle(id: String, x: Int, y: Int) {
+        if (x !in 0 until MAP_COLUMNS || y !in 0 until MAP_ROWS) return
+        val exists = state.obstacles.any { it.id.equals(id, ignoreCase = true) }
+        state = if (exists) {
+            state.copy(obstacles = state.obstacles.map { if (it.id.equals(id, ignoreCase = true)) it.copy(x = x, y = y) else it })
+        } else {
+            state.copy(obstacles = state.obstacles + Obstacle(id, x, y))
+        }
+        addStatus("$id placed at ($x,$y) (from remote)")
     }
 
     private fun markConnectionLost(detail: String) {
