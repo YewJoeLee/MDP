@@ -47,4 +47,13 @@ class ProtocolAndActivityTest {
         assertNull(parseProtocolMessage("ROBOT,6,2,invalid"))
         assertTrue(parseProtocolMessage("TARGET,B1,5,N") is ProtocolMessage.Target)
     }
+
+    @Test
+    fun facesTurnInTheExpectedDirection() {
+        assertEquals(Face.W, Face.N.turnLeft())
+        assertEquals(Face.E, Face.N.turnRight())
+        assertEquals(Face.N, Face.W.turnRight())
+        assertEquals(1, Face.E.dx)
+        assertEquals(-1, Face.S.dy)
+    }
 }

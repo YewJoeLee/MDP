@@ -331,12 +331,22 @@ class BluetoothController(private val context: Context) {
         addStatus("Bluetooth disconnected")
     }
 
-    /**
-     * Sends one of the AMDTOOL's configured movement commands. The arena changes only when a
-     * `ROBOT,...` update is received, so tapping Turn Left/Right never fakes a 90-degree turn on
-     * the Android map when the physical robot makes a gradual turn.
-     */
     fun moveRobot(command: String) {
+        val robot = state.robot
+        val updated = when (command) {
+            "f" -> robot.copy(
+                x = (robot.x + robot.direction.dx).coerceIn(0, MAP_COLUMNS - 1),
+                y = (robot.y + robot.direction.dy).coerceIn(0, MAP_ROWS - 1)
+            )
+            "r" -> robot.copy(
+                x = (robot.x - robot.direction.dx).coerceIn(0, MAP_COLUMNS - 1),
+                y = (robot.y - robot.direction.dy).coerceIn(0, MAP_ROWS - 1)
+            )
+            "tl" -> robot.copy(direction = robot.direction.turnLeft())
+            "tr" -> robot.copy(direction = robot.direction.turnRight())
+            else -> null
+        }
+        if (updated != null) state = state.copy(robot = updated)
         send(command)
     }
 
@@ -401,6 +411,25 @@ class BluetoothController(private val context: Context) {
     fun clearObstacleTarget(id: String) {
         state = state.copy(obstacles = clearObstacleFace(state.obstacles, id))
         addStatus("Cleared selected face for $id")
+    }
+
+    /** Updates the configured robot start position and syncs it to the remote side. */
+    fun setRobotStart(x: Int, y: Int) {
+        val robot = state.robot.copy(
+            x = x.coerceIn(0, MAP_COLUMNS - 1),
+            y = y.coerceIn(0, MAP_ROWS - 1)
+        )
+        state = state.copy(robot = robot)
+        send("ROBOT,${robot.x},${robot.y},${robot.direction.code}")
+        addStatus("Robot start set to (${robot.x},${robot.y})")
+    }
+
+    /** Updates the configured robot facing direction and syncs it to the remote side. */
+    fun setRobotFace(face: Face) {
+        val robot = state.robot.copy(direction = face)
+        state = state.copy(robot = robot)
+        send("ROBOT,${robot.x},${robot.y},${robot.direction.code}")
+        addStatus("Robot facing set to ${face.code}")
     }
 
     /** Sends the current arena layout as the same ADD, FACE, and ROBOT messages used live. */
@@ -544,7 +573,13 @@ class BluetoothController(private val context: Context) {
             else -> when (val message = parseProtocolMessage(line)) {
                 is ProtocolMessage.Text -> addStatus(message.text)
                 is ProtocolMessage.Target -> state = state.copy(obstacles = applyTargetRecognition(state.obstacles, message))
-                is ProtocolMessage.Robot -> state = state.copy(robot = RobotState(message.x, message.y, message.direction))
+                is ProtocolMessage.Robot -> state = state.copy(
+                    robot = RobotState(
+                        message.x.coerceIn(0, MAP_COLUMNS - 1),
+                        message.y.coerceIn(0, MAP_ROWS - 1),
+                        message.direction
+                    )
+                )
                 null -> Unit
             }
         }
