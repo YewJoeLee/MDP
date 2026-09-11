@@ -65,6 +65,7 @@ import com.example.mdpandroid.MAP_ROWS
 import com.example.mdpandroid.Obstacle
 import com.example.mdpandroid.ROBOT_FOOTPRINT_RADIUS
 import com.example.mdpandroid.RobotState
+import com.example.mdpandroid.RobotCommand
 import com.example.mdpandroid.faceFromDrag
 import com.example.mdpandroid.gridPoint
 import com.example.mdpandroid.occupies
@@ -80,7 +81,7 @@ internal fun ArenaScreen(
     padding: PaddingValues,
     state: AppState,
     controlsEnabled: Boolean,
-    onCommand: (String) -> Unit,
+    onCommand: (RobotCommand) -> Unit,
     onAddObstacle: (GridPoint) -> Unit,
     onMoveObstacle: (String, Int, Int) -> Unit,
     onRemoveObstacle: (String) -> Unit,

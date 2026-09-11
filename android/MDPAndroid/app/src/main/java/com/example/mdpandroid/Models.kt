@@ -78,14 +78,14 @@ sealed interface ProtocolMessage {
 fun parseProtocolMessage(line: String): ProtocolMessage? {
     val parts = line.split(",").map { it.trim().removePrefix("[").removeSuffix("]") }
     return when (parts.firstOrNull()?.uppercase()) {
-        "MSG" -> parts.drop(1).joinToString(",").takeIf { it.isNotBlank() }?.let(ProtocolMessage::Text)
-        "TARGET" -> {
+        RobotProtocol.MESSAGE -> parts.drop(1).joinToString(",").takeIf { it.isNotBlank() }?.let(ProtocolMessage::Text)
+        RobotProtocol.TARGET -> {
             val id = parts.getOrNull(1)?.let(::canonicalObstacleId) ?: return null
             val target = parts.getOrNull(2)?.takeIf { it.isNotBlank() } ?: return null
             val face = parts.getOrNull(3)?.uppercase()?.let { code -> Face.entries.firstOrNull { it.code == code } }
             ProtocolMessage.Target(id, target, face)
         }
-        "ROBOT" -> {
+        RobotProtocol.ROBOT -> {
             val x = parts.getOrNull(1)?.toIntOrNull() ?: return null
             val y = parts.getOrNull(2)?.toIntOrNull() ?: return null
             val direction = parts.getOrNull(3)?.uppercase()?.let { code -> Face.entries.firstOrNull { it.code == code } }

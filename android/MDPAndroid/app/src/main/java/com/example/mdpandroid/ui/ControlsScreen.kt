@@ -32,6 +32,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.mdpandroid.RobotCommand
 import com.example.mdpandroid.ui.theme.MissionTeal
 
 @Composable
@@ -67,7 +68,7 @@ internal fun ControlAvailabilityCard(enabled: Boolean, demoMode: Boolean) {
 }
 
 @Composable
-internal fun ControlCard(enabled: Boolean, onCommand: (String) -> Unit) {
+internal fun ControlCard(enabled: Boolean, onCommand: (RobotCommand) -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(24.dp),
@@ -93,7 +94,7 @@ internal fun ControlCard(enabled: Boolean, onCommand: (String) -> Unit) {
 }
 
 @Composable
-internal fun ArenaDriveCard(enabled: Boolean, onCommand: (String) -> Unit, modifier: Modifier = Modifier) {
+internal fun ArenaDriveCard(enabled: Boolean, onCommand: (RobotCommand) -> Unit, modifier: Modifier = Modifier) {
     Card(
         modifier = modifier.fillMaxSize(),
         shape = RoundedCornerShape(20.dp),
@@ -111,14 +112,14 @@ internal fun ArenaDriveCard(enabled: Boolean, onCommand: (String) -> Unit, modif
 }
 
 @Composable
-internal fun DrivePad(enabled: Boolean, onCommand: (String) -> Unit, buttonSize: Dp) {
+internal fun DrivePad(enabled: Boolean, onCommand: (RobotCommand) -> Unit, buttonSize: Dp) {
     Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
         DriveCommandButton(
             icon = Icons.Default.KeyboardArrowUp,
             contentDescription = "Move forward",
             enabled = enabled,
             buttonSize = buttonSize,
-            onClick = { onCommand("f") }
+            onClick = { onCommand(RobotCommand.FORWARD) }
         )
         Row(horizontalArrangement = Arrangement.spacedBy(buttonSize / 6), verticalAlignment = Alignment.CenterVertically) {
             DriveCommandButton(
@@ -126,25 +127,25 @@ internal fun DrivePad(enabled: Boolean, onCommand: (String) -> Unit, buttonSize:
                 contentDescription = "Turn left",
                 enabled = enabled,
                 buttonSize = buttonSize,
-                onClick = { onCommand("tl") }
+                onClick = { onCommand(RobotCommand.TURN_LEFT) }
             )
             DriveCommandButton(
                 icon = Icons.Default.KeyboardArrowDown,
                 contentDescription = "Reverse",
                 enabled = enabled,
                 buttonSize = buttonSize,
-                onClick = { onCommand("r") }
+                onClick = { onCommand(RobotCommand.REVERSE) }
             )
             DriveCommandButton(
                 icon = Icons.AutoMirrored.Filled.KeyboardArrowRight,
                 contentDescription = "Turn right",
                 enabled = enabled,
                 buttonSize = buttonSize,
-                onClick = { onCommand("tr") }
+                onClick = { onCommand(RobotCommand.TURN_RIGHT) }
             )
         }
         OutlinedButton(
-            onClick = { onCommand("STOP") },
+            onClick = { onCommand(RobotCommand.STOP) },
             enabled = enabled,
             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp)
         ) {
@@ -177,7 +178,7 @@ internal fun DriveCommandButton(
 @Composable
 internal fun AssessmentCommandCard(
     enabled: Boolean,
-    onCommand: (String) -> Unit,
+    onCommand: (RobotCommand) -> Unit,
     onSendArena: () -> Unit
 ) {
     Card(
@@ -193,10 +194,10 @@ internal fun AssessmentCommandCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                Button(onClick = { onCommand("beginExplore") }, enabled = enabled, modifier = Modifier.weight(1f)) {
+                Button(onClick = { onCommand(RobotCommand.BEGIN_EXPLORE) }, enabled = enabled, modifier = Modifier.weight(1f)) {
                     Text("Task 1\nExplore")
                 }
-                Button(onClick = { onCommand("beginFastest") }, enabled = enabled, modifier = Modifier.weight(1f)) {
+                Button(onClick = { onCommand(RobotCommand.BEGIN_FASTEST) }, enabled = enabled, modifier = Modifier.weight(1f)) {
                     Text("Task 2\nFastest path")
                 }
             }

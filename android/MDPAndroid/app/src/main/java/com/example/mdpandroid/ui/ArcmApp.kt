@@ -49,6 +49,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.mdpandroid.BluetoothController
 import com.example.mdpandroid.BluetoothDeviceInfo
+import com.example.mdpandroid.RobotCommand
+import com.example.mdpandroid.RobotMessages
 import com.example.mdpandroid.ui.theme.MissionTeal
 import com.example.mdpandroid.ui.theme.SuccessContainer
 
@@ -109,12 +111,12 @@ fun ARCMApp(
             }
         }
     ) { padding ->
-        val onCommand: (String) -> Unit = { command ->
-            controller.moveRobot(command)
-            if (demoMode) controller.addStatus("Demo command: $command")
+        val onCommand: (RobotCommand) -> Unit = { command ->
+            controller.moveRobot(command, sendToRobot = !demoMode)
+            if (demoMode) controller.addStatus(RobotMessages.demoCommand(command))
         }
         val onSendArena: () -> Unit = {
-            if (demoMode) controller.addStatus("Demo arena sync prepared")
+            if (demoMode) controller.addStatus(RobotMessages.ARENA_SYNC_PREPARED)
             else controller.sendArenaSnapshot()
         }
         when (AppTab.entries[selectedTab]) {
@@ -125,7 +127,7 @@ fun ARCMApp(
                     demoMode = demoMode,
                     onDemoModeChange = { demoMode = it },
                     onScan = {
-                        if (demoMode) controller.addStatus("Demo mode: Bluetooth scan skipped")
+                        if (demoMode) controller.addStatus(RobotMessages.DEMO_SCAN_SKIPPED)
                         else requestBluetoothPermissions()
                         showDevices = true
                     },
@@ -178,7 +180,7 @@ fun ARCMApp(
             connectedAddress = state.connectedAddress,
             onDismiss = { showDevices = false },
             onScan = {
-                if (demoMode) controller.addStatus("Demo mode: no Bluetooth devices")
+                if (demoMode) controller.addStatus(RobotMessages.DEMO_NO_BLUETOOTH_DEVICES)
                 else requestBluetoothPermissions()
             },
             onSelect = {

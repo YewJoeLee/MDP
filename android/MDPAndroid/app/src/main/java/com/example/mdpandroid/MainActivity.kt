@@ -22,7 +22,7 @@ class MainActivity : ComponentActivity() {
             bluetoothController.startScan()
             bluetoothController.startServerListening()
         } else {
-            bluetoothController.addStatus("Bluetooth permission is required before scanning")
+            bluetoothController.addStatus(RobotMessages.PERMISSION_REQUIRED_TO_SCAN)
         }
     }
 
