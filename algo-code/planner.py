@@ -95,6 +95,39 @@ def apply(robot, move):
         if facing == "E":
             return (x + 3, y + 3, "N")
 
+    # Backward-right turn
+
+    if move == "BR":
+
+        if facing == "N":
+            return (x + 3, y - 3, "W")
+
+        if facing == "W":
+            return (x + 3, y + 3, "S")
+
+        if facing == "S":
+            return (x - 3, y + 3, "E")
+
+        if facing == "E":
+            return (x - 3, y - 3, "N")
+
+
+    # Backward-left turn
+
+    if move == "BL":
+
+        if facing == "N":
+            return (x - 3, y - 3, "E")
+
+        if facing == "E":
+            return (x - 3, y + 3, "S")
+
+        if facing == "S":
+            return (x + 3, y + 3, "W")
+
+        if facing == "W":
+            return (x + 3, y - 3, "N")
+
 
     return robot
 
@@ -164,7 +197,7 @@ for pose in VIEWING_POSES:
 
 def neighbours(pose, obstacles):
 
-    possible_moves = ["FW", "BW", "FR", "FL"]
+    possible_moves = ["FW", "BW", "FR", "FL","BR", "BL"]
 
     valid_moves = []
 
@@ -186,6 +219,12 @@ def neighbours(pose, obstacles):
 
             if move == "FL":
                 cost = 4
+
+            if move == "BR":
+                cost = 5
+
+            if move == "BL":
+                cost = 5
 
 
             valid_moves.append(
@@ -381,6 +420,12 @@ def path_cost(path):
 
         if move == "FL":
             total_cost = total_cost + 4
+
+        if move == "BR":
+            total_cost = total_cost + 5
+
+        if move == "BL":
+            total_cost = total_cost + 5
 
     return total_cost
 

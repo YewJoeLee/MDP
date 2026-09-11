@@ -59,9 +59,13 @@ print("Greedy order:", GREEDY_ORDER)
 
 print("Greedy cost:", GREEDY_COST)
 
+print("Greedy path:", GREEDY_PATH)
+
 print("Best order:", BEST_ORDER)
 
 print("Best cost:", BEST_COST)
+
+print("Optimal path:", OPTIMAL_PATH)
 
 PATH = OPTIMAL_PATH
 
