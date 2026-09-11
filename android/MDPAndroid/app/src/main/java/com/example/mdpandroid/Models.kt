@@ -1,5 +1,10 @@
 package com.example.mdpandroid
 
+import kotlin.math.abs
+
+internal const val MAP_COLUMNS = 20
+internal const val MAP_ROWS = 20
+
 data class GridPoint(val x: Int, val y: Int)
 
 enum class Face(val code: String, val dx: Int, val dy: Int) {
@@ -27,6 +32,18 @@ data class RobotState(
     val x: Int = 6,
     val y: Int = 2,
     val direction: Face = Face.W
+)
+
+/** The robot occupies a square footprint centered on (x,y); a radius of 1 means 3x3. */
+const val ROBOT_FOOTPRINT_RADIUS = 1
+
+fun RobotState.occupies(x: Int, y: Int): Boolean =
+    abs(x - this.x) <= ROBOT_FOOTPRINT_RADIUS && abs(y - this.y) <= ROBOT_FOOTPRINT_RADIUS
+
+/** Clamps a robot center so its whole footprint stays on the MAP_COLUMNS x MAP_ROWS grid. */
+fun clampRobotCenter(x: Int, y: Int): GridPoint = GridPoint(
+    x.coerceIn(ROBOT_FOOTPRINT_RADIUS, MAP_COLUMNS - 1 - ROBOT_FOOTPRINT_RADIUS),
+    y.coerceIn(ROBOT_FOOTPRINT_RADIUS, MAP_ROWS - 1 - ROBOT_FOOTPRINT_RADIUS)
 )
 
 data class Obstacle(

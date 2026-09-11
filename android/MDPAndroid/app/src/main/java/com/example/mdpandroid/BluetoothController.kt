@@ -334,14 +334,10 @@ class BluetoothController(private val context: Context) {
     fun moveRobot(command: String) {
         val robot = state.robot
         val updated = when (command) {
-            "f" -> robot.copy(
-                x = (robot.x + robot.direction.dx).coerceIn(0, MAP_COLUMNS - 1),
-                y = (robot.y + robot.direction.dy).coerceIn(0, MAP_ROWS - 1)
-            )
-            "r" -> robot.copy(
-                x = (robot.x - robot.direction.dx).coerceIn(0, MAP_COLUMNS - 1),
-                y = (robot.y - robot.direction.dy).coerceIn(0, MAP_ROWS - 1)
-            )
+            "f" -> clampRobotCenter(robot.x + robot.direction.dx, robot.y + robot.direction.dy)
+                .let { robot.copy(x = it.x, y = it.y) }
+            "r" -> clampRobotCenter(robot.x - robot.direction.dx, robot.y - robot.direction.dy)
+                .let { robot.copy(x = it.x, y = it.y) }
             "tl" -> robot.copy(direction = robot.direction.turnLeft())
             "tr" -> robot.copy(direction = robot.direction.turnRight())
             else -> null
@@ -376,8 +372,12 @@ class BluetoothController(private val context: Context) {
         }
     }
 
-    fun addObstacleAt(point: GridPoint) {
+    fun addObstacle(point: GridPoint) {
         if (point.x !in 0 until MAP_COLUMNS || point.y !in 0 until MAP_ROWS) return
+        if (state.robot.occupies(point.x, point.y)) {
+            addStatus("Cannot place an obstacle on the robot")
+            return
+        }
         if (state.obstacles.any { it.x == point.x && it.y == point.y }) return
         val nextNumber = (state.obstacles.mapNotNull { it.id.removePrefix("B").toIntOrNull() }.maxOrNull() ?: 0) + 1
         val obstacle = Obstacle("B$nextNumber", point.x, point.y)
@@ -387,7 +387,10 @@ class BluetoothController(private val context: Context) {
 
     fun moveObstacle(id: String, x: Int, y: Int) {
         val obstacle = state.obstacles.firstOrNull { it.id == id } ?: return
-        if (x !in 0 until MAP_COLUMNS || y !in 0 until MAP_ROWS || state.obstacles.any { it.id != id && it.x == x && it.y == y }) {
+        val invalidTarget = x !in 0 until MAP_COLUMNS || y !in 0 until MAP_ROWS ||
+            state.obstacles.any { it.id != id && it.x == x && it.y == y } ||
+            state.robot.occupies(x, y)
+        if (invalidTarget) {
             removeObstacle(id)
             return
         }
@@ -415,10 +418,8 @@ class BluetoothController(private val context: Context) {
 
     /** Updates the configured robot start position and syncs it to the remote side. */
     fun setRobotStart(x: Int, y: Int) {
-        val robot = state.robot.copy(
-            x = x.coerceIn(0, MAP_COLUMNS - 1),
-            y = y.coerceIn(0, MAP_ROWS - 1)
-        )
+        val clamped = clampRobotCenter(x, y)
+        val robot = state.robot.copy(x = clamped.x, y = clamped.y)
         state = state.copy(robot = robot)
         send("ROBOT,${robot.x},${robot.y},${robot.direction.code}")
         addStatus("Robot start set to (${robot.x},${robot.y})")
@@ -430,6 +431,15 @@ class BluetoothController(private val context: Context) {
         state = state.copy(robot = robot)
         send("ROBOT,${robot.x},${robot.y},${robot.direction.code}")
         addStatus("Robot facing set to ${face.code}")
+    }
+
+    /** Sets the robot's full starting pose (position + facing) in one update and syncs it to the remote side. */
+    fun setRobotPose(x: Int, y: Int, direction: Face) {
+        val clamped = clampRobotCenter(x, y)
+        val robot = RobotState(clamped.x, clamped.y, direction)
+        state = state.copy(robot = robot)
+        send("ROBOT,${robot.x},${robot.y},${robot.direction.code}")
+        addStatus("Robot start set to (${robot.x},${robot.y}) facing ${direction.code}")
     }
 
     /** Sends the current arena layout as the same ADD, FACE, and ROBOT messages used live. */
@@ -573,13 +583,10 @@ class BluetoothController(private val context: Context) {
             else -> when (val message = parseProtocolMessage(line)) {
                 is ProtocolMessage.Text -> addStatus(message.text)
                 is ProtocolMessage.Target -> state = state.copy(obstacles = applyTargetRecognition(state.obstacles, message))
-                is ProtocolMessage.Robot -> state = state.copy(
-                    robot = RobotState(
-                        message.x.coerceIn(0, MAP_COLUMNS - 1),
-                        message.y.coerceIn(0, MAP_ROWS - 1),
-                        message.direction
-                    )
-                )
+                is ProtocolMessage.Robot -> {
+                    val clamped = clampRobotCenter(message.x, message.y)
+                    state = state.copy(robot = RobotState(clamped.x, clamped.y, message.direction))
+                }
                 null -> Unit
             }
         }
@@ -594,6 +601,10 @@ class BluetoothController(private val context: Context) {
 
     private fun upsertRemoteObstacle(id: String, point: GridPoint) {
         if (point.x !in 0 until MAP_COLUMNS || point.y !in 0 until MAP_ROWS) return
+        if (state.robot.occupies(point.x, point.y)) {
+            addStatus("Ignored $id at (${point.x},${point.y}): robot is there")
+            return
+        }
         val exists = state.obstacles.any { it.id.equals(id, ignoreCase = true) }
         state = if (exists) {
             state.copy(obstacles = state.obstacles.map {
