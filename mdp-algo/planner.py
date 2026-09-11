@@ -28,7 +28,7 @@ import config
 # DIRECTION TABLES
 # ---------------------------------------------------------------------
 
-# One step forward, for each facing. N is +y, E is +x.
+#Robot needs to move forward, but 'forward' is differet depending on which direction it is facing
 FORWARD_STEP = {"N": (0, 1), "E": (1, 0), "S": (0, -1), "W": (-1, 0)}
 
 # One step to the robot's right, and to its left.
@@ -121,6 +121,7 @@ def turn_sweep_cells(pose, move):
     A turn is not a teleport. If we only checked the start and end of a
     turn, the planner would happily sweep the car straight through an
     obstacle corner. So we sample three points along the quarter circle.
+    It makes sure that the entire turn is valid, i.e the robot does not cross boundary / hit obstacle during turn
     """
     x = pose[0]
     y = pose[1]
@@ -222,7 +223,8 @@ def is_cell_allowed(x, y, obstacles):
 
     for obstacle in obstacles:
 
-        gap_x = abs(obstacle[1] - x)
+        #Inflate the obstacle
+        gap_x = abs(obstacle[1] - x) 
         gap_y = abs(obstacle[2] - y)
 
         if gap_x <= banned and gap_y <= banned:
@@ -303,10 +305,10 @@ def find_path(start_pose, goal_pose, obstacles):
     If there is no way through, returns ([], infinity). It never crashes
     and never loops forever.
     """
-    open_set = [(0.0, start_pose)]
+    open_set = [(0.0, start_pose)] #Contains states that A* needs to visit
 
-    came_from = {}                    # pose -> (previous_pose, move)
-    g_score = {start_pose: 0.0}       # best real cost found to each pose
+    came_from = {}                    # pose -> (previous_pose, move). B came from A using FR. Allows us to reconstruct final path
+    g_score = {start_pose: 0.0}       # Actual real cost found to each pose
     closed = set()                    # poses we are finished with
 
     while len(open_set) > 0:
@@ -321,7 +323,7 @@ def find_path(start_pose, goal_pose, obstacles):
 
         if current == goal_pose:
 
-            # Walk the breadcrumbs backwards, then flip the list.
+            #Reconstruct the final path
             moves = []
             pose = current
 
@@ -374,10 +376,8 @@ def build_cost_matrix(start_pose, stops, obstacles):
 
     for from_pose in places:
         for to_pose in stops:
-
             if from_pose == to_pose:
                 continue
-
             moves, cost = find_path(from_pose, to_pose, obstacles)
             costs[(from_pose, to_pose)] = cost
             routes[(from_pose, to_pose)] = moves
@@ -473,15 +473,16 @@ def plan(obstacles, start_pose=config.START_POSE):
     those places once, then pick the order twice - greedily for B.2, and
     by trying every order for B.3.
     """
-    stops = []
-    pose_to_id = {}
+    stops = [] #List of locations where robot must stop (i.e 20 - 50cm away from image of each of the 5 obstacles)
+    pose_to_id = {} #Viewing Pose : ID
 
+    #Compute stops list and pose_to_id hashmap
     for obstacle in obstacles:
         pose = viewing_pose(obstacle)
         stops.append(pose)
         pose_to_id[pose] = obstacle[0]
 
-    costs, routes = build_cost_matrix(start_pose, stops, obstacles)
+    costs, routes = build_cost_matrix(start_pose, stops, obstacles) #Runs A* between all pairs of stops
 
     # If the map is ever edited into something impossible, say so clearly
     # instead of failing in a confusing way later on.
