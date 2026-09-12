@@ -20,7 +20,6 @@ Order of the file:
 import heapq
 import itertools
 import math
-
 import config
 
 
@@ -28,20 +27,21 @@ import config
 # DIRECTION TABLES
 # ---------------------------------------------------------------------
 
-#Robot needs to move forward, but 'forward' is differet depending on which direction it is facing
+#Robot needs to move forward, but 'forward' is different depending on which direction it is facing
 FORWARD_STEP = {"N": (0, 1), "E": (1, 0), "S": (0, -1), "W": (-1, 0)}
 
 # One step to the robot's right, and to its left.
 RIGHT_STEP = {"N": (1, 0), "E": (0, -1), "S": (-1, 0), "W": (0, 1)}
 LEFT_STEP = {"N": (-1, 0), "E": (0, 1), "S": (1, 0), "W": (0, -1)}
 
-# Which way you end up facing after turning 90 degrees.
+# Which way you end up facing after turning 90 degrees. 
+# For eg, if robot is currently facing north, then after turning 90 degrees to the right with either FR or BL, so we use RIGHT_OF
+# Likewise for when robot is turning 90 degrees to the left (FL or BR), we use LEFT_OF.
 RIGHT_OF = {"N": "E", "E": "S", "S": "W", "W": "N"}
 LEFT_OF = {"N": "W", "W": "S", "S": "E", "E": "N"}
 
 # The opposite direction, used to work out viewing poses.
 OPPOSITE_OF = {"N": "S", "S": "N", "E": "W", "W": "E"}
-
 
 # ---------------------------------------------------------------------
 # MOTION PRIMITIVES
@@ -247,7 +247,7 @@ def is_valid(pose, obstacles):
 # ---------------------------------------------------------------------
 
 def neighbours(pose, obstacles):
-    """Every legal next step, as a list of (new_pose, move_name, cost).
+    """Returns every legal next step, as a list of (new_pose, move, cost).
 
     This is the only thing A* needs to know about the world.
     """
@@ -321,28 +321,22 @@ def find_path(start_pose, goal_pose, obstacles):
 
         closed.add(current)
 
-        if current == goal_pose:
-
-            #Reconstruct the final path
+        if current == goal_pose: #Reconstruct the final path
             moves = []
             pose = current
-
             while pose in came_from:
                 moves.append(came_from[pose][1])
                 pose = came_from[pose][0]
-
             moves.reverse()
             return moves, g_score[current]
 
         for next_pose, move, step_cost in neighbours(current, obstacles):
-
             if next_pose in closed:
                 continue
 
             tentative = g_score[current] + step_cost
 
-            # What is the best route to this pose we already knew about?
-            if next_pose in g_score:
+            if next_pose in g_score: # What is the best route to this pose we already knew about?
                 best_known = g_score[next_pose]
             else:
                 best_known = float("inf")
@@ -446,12 +440,13 @@ def best_order(start_pose, stops, costs):
     return winner, winner_cost
 
 
-def stitch_path(start_pose, order, routes, pose_to_id):
+def construct_moves_list(start_pose, order, routes, pose_to_id):
     """Glue the separate legs into ONE flat list of moves.
 
     A "SNAP" marker is dropped in wherever the robot stops to photograph
-    an image, so the animation knows where to pause.
+    an image, so the robot knows where to pause.
     """
+
     moves = []
     current = start_pose
 
@@ -505,10 +500,10 @@ def plan(obstacles, start_pose=config.START_POSE):
         "pose_to_id": pose_to_id,
         "greedy_order": greedy,
         "greedy_cost": greedy_cost,
-        "greedy_moves": stitch_path(start_pose, greedy, routes, pose_to_id),
+        "greedy_moves": construct_moves_list(start_pose, greedy, routes, pose_to_id),
         "optimal_order": optimal,
         "optimal_cost": optimal_cost,
-        "optimal_moves": stitch_path(start_pose, optimal, routes, pose_to_id),
+        "optimal_moves": construct_moves_list(start_pose, optimal, routes, pose_to_id),
         "improvement": improvement,
         "orders_tried": math.factorial(len(stops)),
     }
@@ -552,3 +547,4 @@ def build_frames(start_pose, moves):
         frames.append((pose, move, False))
 
     return frames
+
