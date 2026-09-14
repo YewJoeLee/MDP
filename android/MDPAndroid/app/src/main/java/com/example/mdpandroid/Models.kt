@@ -72,7 +72,7 @@ fun mergeActivityLog(
 sealed interface ProtocolMessage {
     data class Text(val text: String) : ProtocolMessage
     data class Target(val obstacleId: String, val targetId: String, val face: Face?) : ProtocolMessage
-    data class Robot(val x: Int, val y: Int, val direction: Face) : ProtocolMessage
+    data class Robot(val x: Int, val y: Int, val direction: Face?) : ProtocolMessage
 }
 
 fun parseProtocolMessage(line: String): ProtocolMessage? {
@@ -88,8 +88,9 @@ fun parseProtocolMessage(line: String): ProtocolMessage? {
         RobotProtocol.ROBOT -> {
             val x = parts.getOrNull(1)?.toIntOrNull() ?: return null
             val y = parts.getOrNull(2)?.toIntOrNull() ?: return null
-            val direction = parts.getOrNull(3)?.uppercase()?.let { code -> Face.entries.firstOrNull { it.code == code } }
-                ?: return null
+            val direction = parts.getOrNull(3)?.let { rawDirection ->
+                rawDirection.uppercase().let { code -> Face.entries.firstOrNull { it.code == code } } ?: return null
+            }
             ProtocolMessage.Robot(x, y, direction)
         }
         else -> null

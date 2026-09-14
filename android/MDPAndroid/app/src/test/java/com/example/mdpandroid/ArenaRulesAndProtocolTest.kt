@@ -2,6 +2,7 @@ package com.example.mdpandroid
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -14,6 +15,16 @@ class ArenaRulesAndProtocolTest {
         assertEquals("ADD,B2,(3,4)", RobotProtocol.addObstacle("B2", GridPoint(3, 4)))
         assertEquals("FACE,B2,N,(3,4)", RobotProtocol.setObstacleFace("B2", Face.N, GridPoint(3, 4)))
         assertEquals("ROBOT,6,7,E", RobotProtocol.robotPose(RobotState(6, 7, Face.E)))
+    }
+
+    @Test
+    fun positionOnlyRobotMessageIsRecognizedWithoutAHeading() {
+        val message = parseProtocolMessage("ROBOT,8,9") as? ProtocolMessage.Robot
+
+        assertNotNull(message)
+        assertEquals(8, message?.x)
+        assertEquals(9, message?.y)
+        assertNull(message?.direction)
     }
 
     @Test
