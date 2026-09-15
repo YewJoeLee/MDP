@@ -548,3 +548,87 @@ def build_frames(start_pose, moves):
 
     return frames
 
+# ------------------------------------------------
+# CORRECTION CODE
+# ------------------------------------------------
+
+def get_correction_moves(actual_pose, desired_pose, obstacles):
+    """Calculates corrective moves to get the robot from its actual position
+    back to the desired position.
+    
+    Returns a list of corrective moves and the cost to execute them.
+    """
+    if actual_pose == desired_pose:
+        return [], 0.0
+
+    # Leverage A* to find optimal correction moves around obstacles
+    correction_moves, cost = find_path(actual_pose, desired_pose, obstacles)
+    
+    if cost == float("inf"):
+        raise ValueError(
+            f"Robot drifted into an unrecoverable position {actual_pose} "
+            f"and cannot safely return to {desired_pose}."
+        )
+
+    return correction_moves, cost
+
+
+def execute_step_with_correction(current_pose, move, execute_move_on_stm_fn, get_actual_pose_fn, obstacles):
+    """Executes a single intended move and applies corrective steps if the robot drifts.
+    
+    Parameters:
+    - current_pose: where the robot SHOULD be right now.
+    - move: the next move string (e.g., 'FR', 'FW').
+    - execute_move_on_stm_fn: callback function to send move command to hardware.
+    - get_actual_pose_fn: callback function to fetch actual pose from STM.
+    - obstacles: obstacle list for safe re-pathing.
+    
+    Returns:
+    - target_pose: the end pose reached after correction.
+    - move_history: list of all executed actions (including corrections).
+    """
+    # 1. Target ideal pose after intended move
+    target_pose = apply_move(current_pose, move)
+    
+    # Send move command to hardware and read physical response
+    execute_move_on_stm_fn(move)
+    actual_pose = get_actual_pose_fn()
+    
+    executed_moves = [move]
+
+    # 2 & 3. Compare actual vs desired and perform correction loop
+    while actual_pose != target_pose:
+        corrections, _ = get_correction_moves(actual_pose, target_pose, obstacles)
+        
+        for corr_move in corrections:
+            execute_move_on_stm_fn(corr_move)
+            executed_moves.append(corr_move)
+            
+        actual_pose = get_actual_pose_fn()
+
+    # 4. Robot is now back at target_pose
+    return target_pose, executed_moves
+
+
+def run_plan_with_corrections(start_pose, move_list, execute_move_on_stm_fn, get_actual_pose_fn, obstacles):
+    """Iterates through the entire plan using closed-loop correction step-by-step."""
+    current_pose = start_pose
+    full_execution_history = []
+
+    for move in move_list:
+        # Snap markers do not require physical movement
+        if move.startswith("SNAP"):
+            execute_move_on_stm_fn(move)
+            full_execution_history.append(move)
+            continue
+
+        current_pose, executed_step_moves = execute_step_with_correction(
+            current_pose, 
+            move, 
+            execute_move_on_stm_fn, 
+            get_actual_pose_fn, 
+            obstacles
+        )
+        full_execution_history.extend(executed_step_moves)
+
+    return current_pose, full_execution_history #Returns final pose and entire history of all moves executed
