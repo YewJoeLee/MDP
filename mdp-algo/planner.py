@@ -632,3 +632,77 @@ def run_plan_with_corrections(start_pose, move_list, execute_move_on_stm_fn, get
         full_execution_history.extend(executed_step_moves)
 
     return current_pose, full_execution_history #Returns final pose and entire history of all moves executed
+
+
+def run_with_recompute_A_star(start_pose, target_pose, obstacles, execute_move_fn, get_actual_pose_fn, MAX_CORRECTIVE_MOVEMENTS = 0):
+    """
+    Overall Problem
+    The robot is unlikely to execute a move perfectly according to what our algo wants, so it may not land at desired pose after applying a move. 
+    But the robot is equally unlikely to execute the correction move perfectly as well,
+    so basic error correction layer may not help much / could even worsen original problem
+
+    Possible Solutions
+    1. No error correction code at all. We just compute OVERALL movement list at the start and send it to RPI -> STM and algo code is done there
+    2. We just determine the ORDER in which we will visit the obstacles but do NOT compute OVERALL movements list. 
+        From the current pose, we run A* to next obstacle which will give us a list of moves to reach that obstacle's image side. 
+        We send the 1st move in that list, robot will execute it. Then STM will send actual pose to RPI , which will send it to algo code. 
+        If the actual pose == desired pose, we send the next move in that list. 
+        But if the actual pose != desired pose, we will try an error correction movement 
+        But we will set a cap on how many times we will try it for eg MAX_CORRECTIVE_MOVEMENTS = 2. 
+        If the robot fails to land in the desired pose both times, 
+        then we are forced to compute A* from current pose (after the 2 wrong corrective moves) to the next obstacle pose and continue this way
+    3. Exact same as 2 but MAX_CORRECTIVE_MOVEMENTS = 0, meaning we don't do any corrective movements, rather immediately recompute A* from current pose to obstacle pose
+
+    This function can implement both option 2 and option 3 and is controlled by the <MAX_CORRECTIVE_MOVEMENTS> parameter
+
+    """
+
+    current_pose = start_pose
+    path_moves, _ = find_path(current_pose, target_pose, obstacles)
+    
+    while current_pose != target_pose and len(path_moves) > 0:
+        move = path_moves.pop(0)
+        desired_pose = apply_move(current_pose, move)
+        
+        # 1. Execute intended move on hardware
+        execute_move_fn(move)
+        actual_pose = get_actual_pose_fn()
+        
+        # 2. Check if move was executed perfectly
+        if actual_pose == desired_pose:
+            current_pose = actual_pose
+            continue
+            
+        # 3. Drift detected: Attempt capped correction retries
+        retries = 0
+        corrected_successfully = False
+        
+        while retries < MAX_CORRECTIVE_MOVEMENTS:
+            retries += 1
+            try:
+                corrections, _ = get_correction_moves(actual_pose, desired_pose, obstacles)
+                if not corrections:
+                    break
+                
+                # Execute corrective moves sequentially
+                for corr_move in corrections:
+                    execute_move_fn(corr_move)
+                
+                actual_pose = get_actual_pose_fn()
+
+                if actual_pose == desired_pose:
+                    corrected_successfully = True
+                    break
+            except ValueError:
+                # Robot drifted into an unrecoverable spot for standard correction
+                break
+        
+        current_pose = actual_pose
+        
+        # 4. If corrections failed after max retries, fall back to A* re-planning
+        if not corrected_successfully:
+            path_moves, _ = find_path(current_pose, target_pose, obstacles)
+            
+    return current_pose
+
+
