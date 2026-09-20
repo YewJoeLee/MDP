@@ -219,21 +219,23 @@ def write_cmds_file(commands):
 # Networking
 # ----------------------------------------------------------------------
 
-def recv_json_line(sock, buffer):
+def recv_json_line(sock, buffer=b""):
     """
     Read until we have one complete newline terminated JSON message.
 
+    Buffers raw bytes to safely handle TCP stream fragmentation.
     Returns (message_dict, leftover_buffer).
     """
-    while "\n" not in buffer:
+    while b"\n" not in buffer:
         chunk = sock.recv(4096)
 
         if not chunk:
             raise ConnectionError("Server closed the connection early.")
 
-        buffer += chunk.decode("utf-8")
+        buffer += chunk
 
-    line, buffer = buffer.split("\n", 1)
+    line_bytes, buffer = buffer.split(b"\n", 1)
+    line = line_bytes.decode("utf-8")
 
     return json.loads(line), buffer
 
@@ -287,7 +289,7 @@ def request_plan(host):
         rpi_socket.sendall((json.dumps(request) + "\n").encode("utf-8"))
         print(f"Sent {len(OBSTACLES)} obstacles.")
 
-        reply, _leftover = recv_json_line(rpi_socket, "")
+        reply, _leftover = recv_json_line(rpi_socket, b"")
 
         if reply["status"] != "SUCCESS":
             print("Algo server returned an error:", reply.get("message"))

@@ -8,6 +8,9 @@ viewing_pose()
 is_valid()
 → checks whether that resulting pose is safe
 
+turn_offset() / turn_sweep_cells() / turn_is_clear()
+→ describe a turn's geometry and check the whole arc is safe, not just the end
+
 neighbours()
 → returns all legal next moves and their costs
 
@@ -19,139 +22,182 @@ reconstruct()→ rebuilds the move list
 """
 
 import heapq
+import math
+import time
 from itertools import permutations
 
-def apply(robot, move):
+import config
 
+# ---------------------------------------------------------------------
+# COMPASS HELPERS (built from config.DIRECTION_STEP)
+# ---------------------------------------------------------------------
+
+# Which way is "right" / "left" / "behind" for each facing direction.
+RIGHT_OF = {"N": "E", "E": "S", "S": "W", "W": "N"}
+LEFT_OF = {"N": "W", "W": "S", "S": "E", "E": "N"}
+OPPOSITE_OF = {"N": "S", "S": "N", "E": "W", "W": "E"}
+
+
+# After each turn, which way is the robot facing? (a lookup into the tables above)
+TURN_RESULT_FACING = {
+    "FR": RIGHT_OF,
+    "FL": LEFT_OF,
+    "BR": LEFT_OF,     # reversing to the right swings the nose LEFT
+    "BL": RIGHT_OF,    # reversing to the left swings the nose RIGHT
+}
+
+
+def is_turn(move):
+    """True if this move is one of the four 90 degree turns."""
+    return move in TURN_RESULT_FACING
+
+
+def turn_offset(move):
+    """
+    How far one turn shifts the robot, in the ROBOT'S OWN frame.
+
+    Returns (ahead, right):
+        ahead > 0 means forward, ahead < 0 means backward
+        right > 0 means to its right, right < 0 means to its left
+
+    Every turn has its own two numbers in config.py because every turn has
+    a different turning radius on the real car.
+    """
+
+    if move == "FR":
+        return (config.FORWARD_RIGHT_TURN_AHEAD, config.FORWARD_RIGHT_TURN_SIDE)
+
+    if move == "FL":
+        return (config.FORWARD_LEFT_TURN_AHEAD, -config.FORWARD_LEFT_TURN_SIDE)
+
+    if move == "BR":
+        return (-config.REVERSE_RIGHT_TURN_BACK, config.REVERSE_RIGHT_TURN_SIDE)
+
+    if move == "BL":
+        return (-config.REVERSE_LEFT_TURN_BACK, -config.REVERSE_LEFT_TURN_SIDE)
+
+    raise ValueError("Not a turn: " + str(move))
+
+
+def apply(robot, move):
+    """
+    Work out where a move sends the robot.
+
+    Every distance comes from config.py:
+        FW / BW  -> config.STRAIGHT_CELLS
+        turns    -> the per-turn values read by turn_offset()
+
+    Distances are applied along the direction the robot is facing
+    (forward / right), so no per-direction if-chains are needed.
+    """
     x = robot[0]
     y = robot[1]
     facing = robot[2]
+
+    forward_x, forward_y = config.DIRECTION_STEP[facing]
+    right_x, right_y = config.DIRECTION_STEP[RIGHT_OF[facing]]
+
+    straight = config.STRAIGHT_CELLS
 
 
     # Forward
 
     if move == "FW":
-
-        if facing == "N":
-            return (x, y + 1, "N")
-
-        if facing == "S":
-            return (x, y - 1, "S")
-
-        if facing == "E":
-            return (x + 1, y, "E")
-
-        if facing == "W":
-            return (x - 1, y, "W")
+        return (x + forward_x * straight,
+                y + forward_y * straight,
+                facing)
 
 
     # Backward
 
     if move == "BW":
-
-        if facing == "N":
-            return (x, y - 1, "N")
-
-        if facing == "S":
-            return (x, y + 1, "S")
-
-        if facing == "E":
-            return (x - 1, y, "E")
-
-        if facing == "W":
-            return (x + 1, y, "W")
+        return (x - forward_x * straight,
+                y - forward_y * straight,
+                facing)
 
 
-    # Forward-right turn
+    # Turns: FR, FL, BR, BL
 
-    if move == "FR":
+    if is_turn(move):
+        ahead, right = turn_offset(move)
 
-        if facing == "N":
-            return (x + 3, y + 2, "E")
-
-        if facing == "E":
-            return (x + 3, y - 2, "S")
-
-        if facing == "S":
-            return (x - 3, y - 2, "W")
-
-        if facing == "W":
-            return (x - 3, y + 2, "N")
-
-
-    # Forward-left turn
-
-    if move == "FL":
-
-        if facing == "N":
-            return (x - 3, y + 2, "W")
-
-        if facing == "W":
-            return (x - 3, y - 2, "S")
-
-        if facing == "S":
-            return (x + 3, y - 2, "E")
-
-        if facing == "E":
-            return (x + 3, y + 2, "N")
-
-    # Backward-right turn
-
-    if move == "BR":
-
-        if facing == "N":
-            return (x + 3, y - 4, "W")
-
-        if facing == "W":
-            return (x + 3, y + 4, "S")
-
-        if facing == "S":
-            return (x - 3, y + 4, "E")
-
-        if facing == "E":
-            return (x - 3, y - 4, "N")
-
-
-    # Backward-left turn
-
-    if move == "BL":
-
-        if facing == "N":
-            return (x - 3, y - 4, "E")
-
-        if facing == "E":
-            return (x - 3, y + 4, "S")
-
-        if facing == "S":
-            return (x + 3, y + 4, "W")
-
-        if facing == "W":
-            return (x + 3, y - 4, "N")
+        return (x + forward_x * ahead + right_x * right,
+                y + forward_y * ahead + right_y * right,
+                TURN_RESULT_FACING[move][facing])
 
 
     return robot
 
-def viewing_pose(obstacle):
 
+def turn_sweep_cells(pose, move):
+    """
+    The cells the robot's centre passes through DURING a turn.
+
+    A turn is not a teleport. If we only checked where it starts and ends,
+    the planner would happily sweep the car through an obstacle corner or
+    over the arena wall halfway round. So we sample points along the arc.
+
+    The arc is a quarter ellipse whose two radii are the turn's own
+    "ahead/back" and "side" distances from config.py. In the robot's frame,
+    at fraction t of the way round (angle = t * 90 degrees):
+
+        ahead_now = ahead * sin(angle)
+        right_now = right * (1 - cos(angle))
+
+    At t = 0 that is the start pose; at t = 1 it is exactly what apply()
+    returns. Sample points come from config.TURN_SWEEP_FRACTIONS.
+    """
+    x = pose[0]
+    y = pose[1]
+    facing = pose[2]
+
+    forward_x, forward_y = config.DIRECTION_STEP[facing]
+    right_x, right_y = config.DIRECTION_STEP[RIGHT_OF[facing]]
+
+    ahead, right = turn_offset(move)
+
+    cells = []
+
+    for fraction in config.TURN_SWEEP_FRACTIONS:
+
+        angle = fraction * (math.pi / 2.0)
+
+        ahead_now = ahead * math.sin(angle)
+        right_now = right * (1.0 - math.cos(angle))
+
+        cell_x = round(x + forward_x * ahead_now + right_x * right_now)
+        cell_y = round(y + forward_y * ahead_now + right_y * right_now)
+
+        cells.append((cell_x, cell_y))
+
+    return cells
+
+
+def turn_is_clear(pose, move, obstacles):
+    """True if every sampled cell along the turn's arc is a valid position."""
+    for cell_x, cell_y in turn_sweep_cells(pose, move):
+
+        if not is_valid((cell_x, cell_y, pose[2]), obstacles):
+            return False
+
+    return True
+
+
+def viewing_pose(obstacle):
+    """
+    Nominal pose from which we can photograph an obstacle:
+    config.VIEW_DISTANCE cells in front of the image face, looking back at it.
+    """
     obstacle_x = obstacle[1]
     obstacle_y = obstacle[2]
     image_face = obstacle[3]
 
+    step_x, step_y = config.DIRECTION_STEP[image_face]
 
-    if image_face == "S":
-        return (obstacle_x, obstacle_y - 4, "N")
+    stand_x = obstacle_x + step_x * config.VIEW_DISTANCE
+    stand_y = obstacle_y + step_y * config.VIEW_DISTANCE
 
-
-    if image_face == "N":
-        return (obstacle_x, obstacle_y + 4, "S")
-
-
-    if image_face == "E":
-        return (obstacle_x + 4, obstacle_y, "W")
-
-
-    if image_face == "W":
-        return (obstacle_x - 4, obstacle_y, "E")
+    return (stand_x, stand_y, OPPOSITE_OF[image_face])
 
 
 def is_valid(pose, obstacles):
@@ -159,13 +205,20 @@ def is_valid(pose, obstacles):
     x = pose[0]
     y = pose[1]
 
+    # Robot centre must keep ROBOT_REACH cells of body inside the arena
+    smallest = config.ROBOT_REACH
+    largest = config.GRID - 1 - config.ROBOT_REACH
+
+    # Robot body + safety gap around every obstacle
+    banned = config.ROBOT_REACH + config.SAFETY_CELLS
+
 
     # Check robot stays inside the arena
 
-    if x < 1 or x > 18:
+    if x < smallest or x > largest:
         return False
 
-    if y < 1 or y > 18:
+    if y < smallest or y > largest:
         return False
 
 
@@ -176,9 +229,9 @@ def is_valid(pose, obstacles):
         obstacle_x = obstacle[1]
         obstacle_y = obstacle[2]
 
-        if abs(x - obstacle_x) <= 2:
+        if abs(x - obstacle_x) <= banned:
 
-            if abs(y - obstacle_y) <= 2:
+            if abs(y - obstacle_y) <= banned:
 
                 return False
 
@@ -195,37 +248,23 @@ for pose in VIEWING_POSES:
     print(pose, is_valid(pose, OBSTACLES))
 '''
 
-def neighbours(pose, obstacles):
 
-    possible_moves = ["FW", "BW", "FR", "FL","BR", "BL"]
+def neighbours(pose, obstacles):
 
     valid_moves = []
 
 
-    for move in possible_moves:
+    for move in config.ALL_MOVES:
 
         new_pose = apply(pose, move)
 
         if is_valid(new_pose, obstacles):
 
-            if move == "FW":
-                cost = 1
+            # A turn must be safe along its whole arc, not just at the end
+            if is_turn(move) and not turn_is_clear(pose, move, obstacles):
+                continue
 
-            if move == "BW":
-                cost = 1.5
-
-            if move == "FR":
-                cost = 4
-
-            if move == "FL":
-                cost = 4
-
-            if move == "BR":
-                cost = 5
-
-            if move == "BL":
-                cost = 5
-
+            cost = config.MOVE_COST[move]
 
             valid_moves.append(
                 (new_pose, move, cost)
@@ -233,6 +272,7 @@ def neighbours(pose, obstacles):
 
 
     return valid_moves
+
 
 '''
 #Testing
@@ -249,7 +289,8 @@ def heuristic(current, goal):
 
     distance = abs(current_x - goal_x) + abs(current_y - goal_y)
 
-    return distance * 0.5
+    return distance * config.HEURISTIC_WEIGHT
+
 
 def reconstruct(came_from, current):
 
@@ -268,6 +309,7 @@ def reconstruct(came_from, current):
 
     return moves
 
+
 def find_path(start_pose, goal_pose, obstacles):
 
     open_set = []
@@ -278,7 +320,6 @@ def find_path(start_pose, goal_pose, obstacles):
 
     g_score = {}
     g_score[start_pose] = 0
-
 
     while open_set:
 
@@ -328,6 +369,7 @@ def find_path(start_pose, goal_pose, obstacles):
 
     return None
 
+
 """
 #Testing 
 start = (1, 1, "N")
@@ -346,7 +388,6 @@ def choose_visit_order(start_pose, viewing_poses, obstacles):
     unvisited = list(viewing_poses)
 
     order = []
-
 
     while len(unvisited) > 0:
 
@@ -376,8 +417,8 @@ def choose_visit_order(start_pose, viewing_poses, obstacles):
 
         current = best_pose
 
-
     return order
+
 
 def build_full_path(start_pose, order, obstacles):
 
@@ -403,6 +444,7 @@ def build_full_path(start_pose, order, obstacles):
 
     return full_path
 
+
 # For B3 -> A star optimised path cost
 def path_cost(path):
 
@@ -410,84 +452,20 @@ def path_cost(path):
 
     for move in path:
 
-        if move == "FW":
-            total_cost = total_cost + 1
-
-        if move == "BW":
-            total_cost = total_cost + 1.5
-
-        if move == "FR":
-            total_cost = total_cost + 4
-
-        if move == "FL":
-            total_cost = total_cost + 4
-
-        if move == "BR":
-            total_cost = total_cost + 5
-
-        if move == "BL":
-            total_cost = total_cost + 5
+        total_cost = total_cost + config.MOVE_COST[move]
 
     return total_cost
 
-def find_best_order(start_pose, viewing_poses, obstacles):
-
-    best_order = None
-    best_cost = None
-
-
-    for order in permutations(viewing_poses):
-
-        current = start_pose
-
-        total_cost = 0
-
-        valid_order = True
-
-
-        for goal in order:
-
-            path = find_path(current, goal, obstacles)
-
-            if path is None:
-                valid_order = False
-                break
-
-            total_cost = total_cost + path_cost(path)
-
-            current = goal
-
-
-        if valid_order == True:
-
-            if best_cost is None or total_cost < best_cost:
-
-                best_cost = total_cost
-
-                best_order = order
-
-
-    return best_order, best_cost
 
 # =====================================================================
 # Section added for the RPi <-> Algo integration test.
 # Everything above this line is unchanged.
 #
 # This gives algo_server.py the single entry point it calls:
-#     planner.plan(obstacles, start_pose=(1, 1, "N"))
+#     planner.plan(obstacles, start_pose=config.START_POSE)
 # =====================================================================
 
-import time
-
-CELL_CM = 10
-
-# Distances (in cells) we are willing to stand off from the obstacle,
-# best first. 4 is the nominal photo distance.
-VIEW_DISTANCES = [4, 5, 3]
-
-# Sideways offsets we are willing to accept if we cannot stand
-# dead centre in front of the image.
-VIEW_OFFSETS = [0, -1, 1]
+# (time, config, permutations are imported at the top of the file)
 
 # key = (start_pose, goal_pose, obstacles) -> (path_tuple_or_None, cost_or_None)
 PATH_CACHE = {}
@@ -516,22 +494,21 @@ def viewing_pose_candidates(obstacle):
     obstacle_y = obstacle[2]
     image_face = obstacle[3]
 
+    # Unit step pointing out of the image face, and the axis running along
+    # the face (x for N/S faces, y for E/W faces) used for the offsets.
+    out_x, out_y = config.DIRECTION_STEP[image_face]
+    side_x = abs(out_y)
+    side_y = abs(out_x)
+
     candidates = []
 
-    for distance in VIEW_DISTANCES:
-        for offset in VIEW_OFFSETS:
+    for distance in config.VIEW_DISTANCES:
+        for offset in config.VIEW_OFFSETS:
 
-            if image_face == "S":
-                candidates.append((obstacle_x + offset, obstacle_y - distance, "N"))
+            stand_x = obstacle_x + out_x * distance + side_x * offset
+            stand_y = obstacle_y + out_y * distance + side_y * offset
 
-            elif image_face == "N":
-                candidates.append((obstacle_x + offset, obstacle_y + distance, "S"))
-
-            elif image_face == "E":
-                candidates.append((obstacle_x + distance, obstacle_y + offset, "W"))
-
-            elif image_face == "W":
-                candidates.append((obstacle_x - distance, obstacle_y + offset, "E"))
+            candidates.append((stand_x, stand_y, OPPOSITE_OF[image_face]))
 
     return candidates
 
@@ -658,12 +635,7 @@ def map_hardware_commands(path):
 
     SNAP markers are passed through untouched.
     """
-    turn_map = {
-        "FL": "LT90",
-        "FR": "RT90",
-        "BL": "XL90",
-        "BR": "XR90",
-    }
+    turn_map = config.TURN_COMMANDS
 
     commands = []
     i = 0
@@ -671,14 +643,15 @@ def map_hardware_commands(path):
     while i < len(path):
         move = path[i]
 
-        if move == "FW" or move == "BW":
+        if move in config.STRAIGHT_COMMANDS:
             count = 0
 
             while i < len(path) and path[i] == move:
                 count += 1
                 i += 1
 
-            commands.append(move + str(count * CELL_CM))
+            distance_cm = count * config.STRAIGHT_CELLS * config.CELL_CM
+            commands.append(move + str(distance_cm))
             continue
 
         if move in turn_map:
@@ -686,7 +659,7 @@ def map_hardware_commands(path):
             i += 1
             continue
 
-        if move.startswith("SNAP"):
+        if move.startswith(config.SNAP_PREFIX):
             commands.append(move)
             i += 1
             continue
@@ -696,7 +669,7 @@ def map_hardware_commands(path):
     return commands
 
 
-def plan(obstacles, start_pose=(1, 1, "N")):
+def plan(obstacles, start_pose=config.START_POSE):
     """
     Full planning pipeline, called by algo_server.py.
 
@@ -733,7 +706,7 @@ def plan(obstacles, start_pose=(1, 1, "N")):
 
     for obstacle_id, goal_pose in best_order:
         path, cost = cached_leg(current_pose, goal_pose, obstacles)
-        snap = "SNAP" + str(obstacle_id)
+        snap = config.SNAP_PREFIX + str(obstacle_id)
 
         segment_commands = map_hardware_commands(path)
 
@@ -769,3 +742,5 @@ def plan(obstacles, start_pose=(1, 1, "N")):
         "commands": commands,
         "skipped": skipped,
     }
+
+

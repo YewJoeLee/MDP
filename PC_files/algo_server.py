@@ -60,13 +60,13 @@ def handle_request(payload):
 
 def serve_connection(conn, addr):
     """
-    Read newline delimited JSON requests until the peer hangs up.
+    Read newline-delimited JSON requests until the peer hangs up.
 
-    A single conn.recv() is not enough: TCP is a byte stream, so one
-    recv can return half a message or two messages joined together.
-    We buffer and split on newlines instead.
+    Buffers raw bytes to handle partial TCP packets and multi-byte UTF-8
+    characters without throwing decoding errors.
     """
-    buffer = ""
+    
+    buffer = b""
 
     with conn:
         while True:
@@ -76,32 +76,31 @@ def serve_connection(conn, addr):
                 print(f"[{addr}] disconnected")
                 return
 
-            buffer += chunk.decode("utf-8")
+            buffer += chunk
 
-            while "\n" in buffer:
-                line, buffer = buffer.split("\n", 1)
-                line = line.strip()
+            while b"\n" in buffer:
+                line_bytes, buffer = buffer.split(b"\n", 1)
+                line = line_bytes.decode("utf-8").strip()
 
-                if line == "":
+                if not line:
                     continue
 
                 try:
                     payload = json.loads(line)
                     response = handle_request(payload)
-
                 except Exception as error:
                     traceback.print_exc()
                     response = {"status": "ERROR", "message": str(error)}
 
-                if response["status"] == "SUCCESS":
+                if response.get("status") == "SUCCESS":
                     print(f"[{addr}] order {response['order']} "
                           f"cost {response['total_cost']} "
                           f"in {response['planning_ms']} ms "
                           f"-> {len(response['commands'])} commands")
-                    if response["skipped"]:
+                    if response.get("skipped"):
                         print(f"[{addr}] skipped: {response['skipped']}")
                 else:
-                    print(f"[{addr}] error: {response['message']}")
+                    print(f"[{addr}] error: {response.get('message')}")
 
                 encoded = (json.dumps(response) + "\n").encode("utf-8")
                 conn.sendall(encoded)
