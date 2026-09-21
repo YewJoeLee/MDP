@@ -5,17 +5,17 @@ Sends the obstacle list from test_maps.py to the algo server, receives the
 hardware command list, writes it to a cmds file, then reads that file back
 and dispatches it:
 
-    C<cm>     -> ultrasonic align, sent to the STM just before each photo;
+    AC<cm>    -> ultrasonic align, sent to the STM just before each photo;
                  the reading and correction are printed
     SNAP<id>  -> trigger_camera(): capture, run YOLO, save the annotated
                  frame, send TARGET,<obstacle_id>,<image_id> to Android
     anything  -> written to the STM over the UART by rpi_stm_conn
 
 Usage:
-    python3 fake_rpi_client.py                        # 127.0.0.1, full run
-    python3 fake_rpi_client.py 192.168.1.42           # connects to the laptop
-    python3 fake_rpi_client.py --dry-run              # no camera, no serial
-    python3 fake_rpi_client.py 192.168.1.42 --dry-run
+    python3 rpi_client.py                        # 127.0.0.1, full run
+    python3 rpi_client.py 192.168.1.42           # connects to the laptop
+    python3 rpi_client.py --dry-run              # no camera, no serial
+    python3 rpi_client.py 192.168.1.42 --dry-run
 
 --dry-run only talks to the algo server and prints the plan, so it runs on
 a machine with no camera and no /dev/ttyACM0 (e.g. the laptop).
@@ -38,6 +38,7 @@ CMD_DIR = "cmds"
 LATEST_NAME = "latest.txt"
 
 PHOTO_DIR = "photos"
+ALIGN_PREFIX = "AC"         # must match config.ALIGN_PREFIX on the laptop
 ANDROID_PORT = "/dev/rfcomm0"
 MODEL_PATH = "best_ncnn_model"
 FRAME_SIZE = (416, 416)
@@ -311,8 +312,8 @@ def print_plan(commands):
         upper = command.upper()
         if upper.startswith("SNAP"):
             note = "  <- photo of obstacle " + command[4:]
-        elif upper.startswith("C"):
-            target = command[1:] or "STM default"
+        elif upper.startswith(ALIGN_PREFIX):
+            target = command[len(ALIGN_PREFIX):] or "STM default"
             note = f"  <- ultrasonic align to {target} cm"
         else:
             note = ""

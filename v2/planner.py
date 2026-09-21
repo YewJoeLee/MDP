@@ -671,11 +671,11 @@ def map_hardware_commands(path):
 
 def align_command(obstacle, goal_pose):
     """
-    Ultrasonic align command sent just before the photo, e.g. "C40".
+    Ultrasonic align command sent just before the photo, e.g. "AC25".
 
     Uses the distance (in cells, along the line of sight) between the
     viewing pose the planner chose and the obstacle, so a fallback pose
-    at 5 or 3 cells gets C50 or C30 instead of a wrong C40.
+    at 5 or 3 cells gets AC35 or AC15 instead of a wrong AC25.
     Returns None if alignment is switched off for this pose.
     """
     if not config.ALIGN_ENABLED:

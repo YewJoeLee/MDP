@@ -5,10 +5,10 @@ Send a sequence of commands to the STM32 over /dev/ttyACM0.
 Standalone usage:
     python3 rpi_stm_conn.py                  # runs the COMMANDS list below
     python3 rpi_stm_conn.py FW50 RT90 FW30   # runs commands given on the command line
-    python3 rpi_stm_conn.py C40              # test the ultrasonic align on its own
+    python3 rpi_stm_conn.py AC25             # test the ultrasonic align on its own
     python3 rpi_stm_conn.py -f path.txt      # runs commands from a file (one per line)
 
-As a module (used by fake_rpi_client.py):
+As a module (used by rpi_client.py):
     import rpi_stm_conn
     cmds = rpi_stm_conn.read_cmds_file(path)
     rpi_stm_conn.run_commands(cmds, on_snap=my_camera_function)
@@ -17,14 +17,14 @@ SNAP<id> commands are never written to the UART. They are handed to the
 on_snap callback instead, because the STM does not understand them and
 would simply time out.
 
-C<cm> (ultrasonic align, inserted by the planner just before each SNAP)
+AC<cm> (ultrasonic align, inserted by the planner just before each SNAP)
 is sent to the STM like any other command, but:
   - its reply is decoded and printed as a correction,
   - a failed or timed-out align never stops the run; the photo is taken
     anyway, because a slightly-off photo beats aborting everything.
 
-Expected STM reply to C<cm> (agreed with the STM team):
-    DONE C40 D:<first reading, mm> MV:<net move, mm, + = forward>
+Expected STM reply to AC<cm> (agreed with the STM team):
+    DONE AC25 D:<first reading, mm> MV:<net move, mm, + = forward>
 Extra or missing fields are fine; the raw line is always printed too.
 """
 import sys
@@ -47,7 +47,7 @@ REPLY_TIMEOUT_S = 20      # longest move is 15 s (MOVE_TIMEOUT_MS) + margin
 GAP_BETWEEN_CMDS_S = 0.2  # settle time between commands
 STOP_ON_ERROR = True      # stop the sequence on ERR or timeout (not for align)
 
-ALIGN_PREFIX = "C"        # must match config.ALIGN_PREFIX on the laptop
+ALIGN_PREFIX = "AC"       # must match config.ALIGN_PREFIX on the laptop
 
 # Reply lines that mean "command finished"
 DONE_PREFIXES = ("DONE", "ERR", "SPD", "SERVO", "BIAS", "YAW")
@@ -57,8 +57,8 @@ align_log = []
 
 
 def is_align(cmd):
-    """C, C40, c30 ... (nothing else the STM understands starts with C)."""
-    return cmd[:1].upper() == ALIGN_PREFIX.upper()
+    """AC, AC25, ac30 ... (nothing else the STM understands starts with AC)."""
+    return cmd.upper().startswith(ALIGN_PREFIX.upper())
 
 
 def wait_reply(ser, cmd):
@@ -92,7 +92,7 @@ def wait_reply(ser, cmd):
 
 
 def parse_fields(line):
-    """'DONE C40 D:352 MV:-50 OK' -> {'D': '352', 'MV': '-50'}"""
+    """'DONE AC25 D:283 MV:30 OK' -> {'D': '283', 'MV': '30'}"""
     fields = {}
     for token in (line or "").split():
         if ":" in token:

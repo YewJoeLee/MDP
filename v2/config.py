@@ -59,7 +59,7 @@ SAFETY_CELLS = 1
 
 # How far in front of an image the robot stands to photograph it, in cells.
 # Change to 3 for a closer photo; the align command follows automatically
-# (4 -> C40, 3 -> C30).
+# (4 -> AC25, 3 -> AC15 with the -15 offset below).
 VIEW_DISTANCE = 4
 
 # If the nominal viewing pose is blocked or outside the arena, the planner
@@ -107,7 +107,7 @@ TURN_COMMANDS = {
 SNAP_PREFIX = "SNAP"
 
 # --- ultrasonic alignment before each photo ----------------------------
-# Just before every SNAP the planner inserts an align command, e.g. "C40".
+# Just before every SNAP the planner inserts an align command, e.g. "AC25".
 # The STM drives forward / backward until the ultrasonic sensor reads that
 # many cm, then replies DONE, and the Pi takes the photo.
 #
@@ -115,12 +115,13 @@ SNAP_PREFIX = "SNAP"
 # that obstacle (normally VIEW_DISTANCE, but it can fall back to one of
 # VIEW_DISTANCES), so it is always right for the pose the robot is at:
 #     target_cm = cells_away * ALIGN_CM_PER_CELL + ALIGN_OFFSET_CM
-# With VIEW_DISTANCE = 4 this gives C40. Set VIEW_DISTANCE = 3 for C30.
+# With VIEW_DISTANCE = 4 and ALIGN_OFFSET_CM = -15 this gives AC25.
+# Set VIEW_DISTANCE = 3 for AC15.
 ALIGN_ENABLED = True
-ALIGN_PREFIX = "C"          # agreed with the STM team
-ALIGN_SEND_DISTANCE = True  # True -> "C40". False -> just "C" (STM uses its own fixed target)
+ALIGN_PREFIX = "AC"         # agreed with the STM team
+ALIGN_SEND_DISTANCE = True  # True -> "AC25". False -> just "AC" (STM uses its own fixed target)
 ALIGN_CM_PER_CELL = 10
-ALIGN_OFFSET_CM = -15      # 4 cells * 10 - 15 = C25 (sensor 25 cm from the image)
+ALIGN_OFFSET_CM = -15      # 4 cells * 10 - 15 = AC25 (sensor 25 cm from the image)
 
 # Also align at sideways-offset viewing poses (robot not dead centre in
 # front of the image). The sensor might see the edge of the obstacle there.
