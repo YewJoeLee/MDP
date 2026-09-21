@@ -40,13 +40,13 @@ STRAIGHT_CELLS = 1
 #   AHEAD / BACK = how far it ends up forward / backward
 #   SIDE         = how far it ends up to the left / right (as the name says)
 FORWARD_RIGHT_TURN_AHEAD = 2
-FORWARD_RIGHT_TURN_SIDE = 3
+FORWARD_RIGHT_TURN_SIDE = 4
 FORWARD_LEFT_TURN_AHEAD = 2
-FORWARD_LEFT_TURN_SIDE = 3
+FORWARD_LEFT_TURN_SIDE = 4
 REVERSE_RIGHT_TURN_BACK = 4
-REVERSE_RIGHT_TURN_SIDE = 3
+REVERSE_RIGHT_TURN_SIDE = 2
 REVERSE_LEFT_TURN_BACK = 4
-REVERSE_LEFT_TURN_SIDE = 3
+REVERSE_LEFT_TURN_SIDE = 2
 
 # Points sampled along each turn's arc to check it is collision free.
 TURN_SWEEP_FRACTIONS = [0.25, 0.5, 0.75]

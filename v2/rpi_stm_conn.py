@@ -5,27 +5,22 @@ Send a sequence of commands to the STM32 over /dev/ttyACM0.
 Standalone usage:
     python3 rpi_stm_conn.py                  # runs the COMMANDS list below
     python3 rpi_stm_conn.py FW50 RT90 FW30   # runs commands given on the command line
-    python3 rpi_stm_conn.py AC25             # test the ultrasonic align on its own
     python3 rpi_stm_conn.py -f path.txt      # runs commands from a file (one per line)
 
-As a module (used by rpi_client.py):
+As a module (used by fake_rpi_client.py):
     import rpi_stm_conn
     cmds = rpi_stm_conn.read_cmds_file(path)
     rpi_stm_conn.run_commands(cmds, on_snap=my_camera_function)
 
 SNAP<id> commands are never written to the UART. They are handed to the
-on_snap callback instead, because the STM does not understand them and
-would simply time out.
+on_snap callback instead, because the STM does not understand them.
 
-AC<cm> (ultrasonic align, inserted by the planner just before each SNAP)
-is sent to the STM like any other command, but:
-  - its reply is decoded and printed as a correction,
-  - a failed or timed-out align never stops the run; the photo is taken
-    anyway, because a slightly-off photo beats aborting everything.
-
-Expected STM reply to AC<cm> (agreed with the STM team):
-    DONE AC25 D:<first reading, mm> MV:<net move, mm, + = forward>
-Extra or missing fields are fine; the raw line is always printed too.
+Around every SNAP:
+    APPROACH_CMD (e.g. AP25) is sent first, so the STM uses the ultrasonic
+    to settle at the right distance for the camera.
+    RETURN_CMD (RA) is sent after the photo, so the STM drives back by
+    exactly the distance the approach moved, restoring the planned pose.
+Set either to None to disable it.
 """
 import sys
 import time
@@ -45,28 +40,18 @@ COMMANDS = [
 
 REPLY_TIMEOUT_S = 20      # longest move is 15 s (MOVE_TIMEOUT_MS) + margin
 GAP_BETWEEN_CMDS_S = 0.2  # settle time between commands
-STOP_ON_ERROR = True      # stop the sequence on ERR or timeout (not for align)
+STOP_ON_ERROR = True      # stop the sequence on ERR or timeout
 
-ALIGN_PREFIX = "AC"       # must match config.ALIGN_PREFIX on the laptop
+APPROACH_CMD = "AP25"     # sent before every SNAP; set to None to disable
+RETURN_CMD = "RA"         # sent after every SNAP; set to None to disable
 
 # Reply lines that mean "command finished"
-DONE_PREFIXES = ("DONE", "ERR", "SPD", "SERVO", "BIAS", "YAW")
-
-# One entry per align command in the last run, for the summary.
-align_log = []
-
-
-def is_align(cmd):
-    """AC, AC25, ac30 ... (nothing else the STM understands starts with AC)."""
-    return cmd.upper().startswith(ALIGN_PREFIX.upper())
+DONE_PREFIXES = ("DONE", "ERR", "SPD", "SERVO", "BIAS", "YAW",
+                 "US", "ZEROED", "HERR")
 
 
 def wait_reply(ser, cmd):
-    """
-    Return (result, line):
-        result True on success, False on ERR, None on timeout
-        line   the reply line that finished the command (or None)
-    """
+    """Return True on success, False on ERR, None on timeout."""
     deadline = time.time() + REPLY_TIMEOUT_S
     is_gyro_dump = cmd[:2].upper() == "GY"
     gy_lines = 0
@@ -82,79 +67,33 @@ def wait_reply(ser, cmd):
             if line.startswith("X:"):
                 gy_lines += 1
                 if gy_lines >= 200:
-                    return True, line
+                    return True
             continue
 
         if line.startswith(DONE_PREFIXES):
-            return (not line.startswith("ERR")), line
+            return not line.startswith("ERR")
 
-    return None, None
-
-
-def parse_fields(line):
-    """'DONE AC25 D:283 MV:30 OK' -> {'D': '283', 'MV': '30'}"""
-    fields = {}
-    for token in (line or "").split():
-        if ":" in token:
-            key, _, value = token.partition(":")
-            fields[key.upper()] = value
-    return fields
+    return None
 
 
-def mm_to_cm_text(value):
-    try:
-        return f"{int(value) / 10:.1f} cm"
-    except (TypeError, ValueError):
-        return "?"
+def send_and_wait(ser, cmd):
+    """Write one command, wait for its reply. Returns wait_reply's result."""
+    ser.write((cmd + "\n").encode())
+    ser.flush()
+    return wait_reply(ser, cmd)
 
 
-def report_align(cmd, result, line, dt):
-    """Print the align outcome in plain words and remember it."""
-    target = cmd[len(ALIGN_PREFIX):] or "STM default"
-    fields = parse_fields(line)
-
-    measured = fields.get("D")
-    moved = fields.get("MV")
-
-    if result is True:
-        status = "ok"
-    elif result is False:
-        status = "ERROR"
-    else:
-        status = "TIMEOUT"
-
-    print(f"    [ALIGN] target {target} cm | status {status} | {dt:.1f} s")
-    if measured is not None:
-        print(f"    [ALIGN] sensor read   {mm_to_cm_text(measured)}")
-    if moved is not None:
-        try:
-            mv = int(moved)
-            direction = "forward" if mv > 0 else "backward" if mv < 0 else "no move"
-            print(f"    [ALIGN] correction    {abs(mv) / 10:.1f} cm {direction}")
-        except ValueError:
-            print(f"    [ALIGN] correction    {moved}")
+def send_helper(ser, cmd, label):
+    """
+    Send an approach / return command around a SNAP.
+    Failures are reported but never stop the run: a slightly-off photo
+    is better than no photo.
+    """
+    print(f"    -> {cmd} ({label})")
+    result = send_and_wait(ser, cmd)
     if result is not True:
-        print("    [ALIGN] carrying on and taking the photo anyway")
-
-    align_log.append({
-        "cmd": cmd,
-        "status": status,
-        "measured": measured,
-        "moved": moved,
-        "reply": line,
-    })
-
-
-def print_align_summary():
-    if not align_log:
-        return
-    print()
-    print("Align summary:")
-    for n, entry in enumerate(align_log, 1):
-        measured = mm_to_cm_text(entry["measured"]) if entry["measured"] else "-"
-        moved = mm_to_cm_text(entry["moved"]) if entry["moved"] else "-"
-        print(f"  {n}. {entry['cmd']:<6} {entry['status']:<8} "
-              f"read {measured:<9} moved {moved}")
+        print(f"    {label} failed, continuing")
+    time.sleep(GAP_BETWEEN_CMDS_S)
 
 
 def open_serial():
@@ -186,13 +125,14 @@ def run_commands(cmds, on_snap=None):
     """
     Send each command and wait for its reply.
 
-    SNAP<id> is not sent to the STM. If on_snap is given it is called with
-    the id string; otherwise the command is skipped with a warning.
+    SNAP<id> is not sent to the STM. Instead:
+        1. APPROACH_CMD is sent (if set)
+        2. on_snap(id) is called (if given)
+        3. RETURN_CMD is sent (if set, and only if APPROACH_CMD is set)
 
     Returns True if the whole sequence completed, False if it was cut
     short by an error or timeout while STOP_ON_ERROR is set.
     """
-    align_log.clear()
     ser = open_serial()
     completed = True
 
@@ -201,31 +141,30 @@ def run_commands(cmds, on_snap=None):
             print(f"[{i}/{len(cmds)}] -> {cmd}")
 
             if cmd.upper().startswith("SNAP"):
+                if APPROACH_CMD:
+                    send_helper(ser, APPROACH_CMD, "approach before photo")
+
                 if on_snap:
                     on_snap(cmd[4:])
                 else:
                     print(f"    [CAMERA] no handler for {cmd}, skipping")
+
+                if APPROACH_CMD and RETURN_CMD:
+                    send_helper(ser, RETURN_CMD, "return after photo")
+
                 continue
 
-            ser.write((cmd + "\n").encode())
-            ser.flush()
-
             t0 = time.time()
-            result, line = wait_reply(ser, cmd)
+            result = send_and_wait(ser, cmd)
             dt = time.time() - t0
 
-            if is_align(cmd):
-                report_align(cmd, result, line, dt)
-
-            elif result is True:
+            if result is True:
                 print(f"    ok ({dt:.1f} s)")
-
             elif result is False:
                 print(f"    ERROR ({dt:.1f} s)")
                 if STOP_ON_ERROR:
                     completed = False
                     break
-
             else:
                 print(f"    TIMEOUT after {REPLY_TIMEOUT_S} s")
                 if STOP_ON_ERROR:
@@ -237,7 +176,6 @@ def run_commands(cmds, on_snap=None):
     finally:
         ser.close()
 
-    print_align_summary()
     print("Finished.")
     return completed
 
@@ -257,3 +195,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+    
