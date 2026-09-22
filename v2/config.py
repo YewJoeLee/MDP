@@ -121,7 +121,7 @@ ALIGN_ENABLED = True
 ALIGN_PREFIX = "AC"         # agreed with the STM team
 ALIGN_SEND_DISTANCE = True  # True -> "AC25". False -> just "AC" (STM uses its own fixed target)
 ALIGN_CM_PER_CELL = 10
-ALIGN_OFFSET_CM = -15      # 4 cells * 10 - 15 = AC25 (sensor 25 cm from the image)
+ALIGN_OFFSET_CM = -20      # 4 cells * 10 - 15 = AC25 (sensor 25 cm from the image)
 
 # Also align at sideways-offset viewing poses (robot not dead centre in
 # front of the image). The sensor might see the edge of the obstacle there.
