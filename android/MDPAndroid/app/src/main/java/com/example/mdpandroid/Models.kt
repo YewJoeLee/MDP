@@ -9,8 +9,8 @@ data class GridPoint(val x: Int, val y: Int)
 
 enum class Face(val code: String, val dx: Int, val dy: Int) {
     N("N", 0, 1),
-    E("E", 1, 0),
     S("S", 0, -1),
+    E("E", 1, 0),
     W("W", -1, 0);
 
     fun turnRight(): Face = when (this) {
@@ -71,7 +71,7 @@ fun mergeActivityLog(
 
 sealed interface ProtocolMessage {
     data class Text(val text: String) : ProtocolMessage
-    data class Target(val obstacleId: String, val targetId: String, val face: Face?) : ProtocolMessage
+    data class Target(val obstacleId: String, val targetId: String) : ProtocolMessage
     data class Robot(val x: Int, val y: Int, val direction: Face) : ProtocolMessage
 }
 
@@ -82,8 +82,7 @@ fun parseProtocolMessage(line: String): ProtocolMessage? {
         RobotProtocol.TARGET -> {
             val id = parts.getOrNull(1)?.let(::canonicalObstacleId) ?: return null
             val target = parts.getOrNull(2)?.takeIf { it.isNotBlank() } ?: return null
-            val face = parts.getOrNull(3)?.uppercase()?.let { code -> Face.entries.firstOrNull { it.code == code } }
-            ProtocolMessage.Target(id, target, face)
+            ProtocolMessage.Target(id, target)
         }
         RobotProtocol.ROBOT -> {
             val x = parts.getOrNull(1)?.toIntOrNull() ?: return null
@@ -104,7 +103,7 @@ fun canonicalObstacleId(rawId: String): String {
 fun applyTargetRecognition(obstacles: List<Obstacle>, message: ProtocolMessage.Target): List<Obstacle> =
     obstacles.map { obstacle ->
         if (obstacle.id.equals(message.obstacleId, ignoreCase = true)) {
-            obstacle.copy(targetId = message.targetId, targetFace = message.face ?: obstacle.targetFace)
+            obstacle.copy(targetId = message.targetId)
         } else {
             obstacle
         }

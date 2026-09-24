@@ -457,16 +457,10 @@ class BluetoothController(private val context: Context) {
         }
     }
 
-    /** Sends the current arena layout as the same ADD, FACE, and ROBOT messages used live. */
+    /** Sends the current obstacles as one combined list line, instead of a separate ADD/FACE
+     * pair per obstacle. Robot pose isn't included — only the obstacle layout. */
     fun sendArenaSnapshot() {
-        state.obstacles.forEach { obstacle ->
-            val point = GridPoint(obstacle.x, obstacle.y)
-            send(RobotProtocol.addObstacle(obstacle.id, point))
-            obstacle.targetFace?.let { face ->
-                send(RobotProtocol.setObstacleFace(obstacle.id, face, point))
-            }
-        }
-        send(RobotProtocol.robotPose(state.robot))
+        send(RobotProtocol.obstacleList(state.obstacles))
         addStatus(RobotMessages.arenaSetupSent(state.obstacles.size))
     }
 

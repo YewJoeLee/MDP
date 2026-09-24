@@ -31,8 +31,6 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRowDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -74,39 +72,31 @@ fun ARCMApp(
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
-            Column {
-                TopAppBar(
-                    title = {
-                        Column {
-                            Text("MDP Robot Console", fontWeight = FontWeight.Bold)
-                            Text("Mission control and assessment workspace", fontSize = 11.sp)
-                        }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.primaryContainer,
-                        titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
-                    ),
-                    actions = {
-                        ConnectionIndicator(connected = state.connected, demoMode = demoMode)
-                    }
-                )
-                PrimaryTabRow(
-                    selectedTabIndex = selectedTab,
-                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                    indicator = {
-                        TabRowDefaults.PrimaryIndicator(color = MaterialTheme.colorScheme.primary)
-                    }
+            Surface(color = MaterialTheme.colorScheme.primaryContainer) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    AppTab.entries.forEachIndexed { index, tab ->
-                        Tab(
-                            selected = selectedTab == index,
-                            onClick = { selectedTab = index },
-                            selectedContentColor = MaterialTheme.colorScheme.primary,
-                            unselectedContentColor = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.72f),
-                            text = { Text(tab.title) }
-                        )
+                    PrimaryTabRow(
+                        selectedTabIndex = selectedTab,
+                        modifier = Modifier.weight(1f),
+                        containerColor = MaterialTheme.colorScheme.primaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        indicator = {
+                            TabRowDefaults.PrimaryIndicator(color = MaterialTheme.colorScheme.primary)
+                        }
+                    ) {
+                        AppTab.entries.forEachIndexed { index, tab ->
+                            Tab(
+                                selected = selectedTab == index,
+                                onClick = { selectedTab = index },
+                                selectedContentColor = MaterialTheme.colorScheme.primary,
+                                unselectedContentColor = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.72f),
+                                text = { Text(tab.title) }
+                            )
+                        }
                     }
+                    ConnectionIndicator(connected = state.connected, demoMode = demoMode)
                 }
             }
         }

@@ -1,6 +1,7 @@
 package com.example.mdpandroid.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -93,20 +94,25 @@ internal fun ControlCard(enabled: Boolean, onCommand: (RobotCommand) -> Unit) {
     }
 }
 
+/** No card/background — sits directly above [RobotActivityCard] in the Arena tab. */
 @Composable
-internal fun ArenaDriveCard(enabled: Boolean, onCommand: (RobotCommand) -> Unit, modifier: Modifier = Modifier) {
-    Card(
-        modifier = modifier.fillMaxSize(),
-        shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-    ) {
+internal fun ManualControlSection(enabled: Boolean, onCommand: (RobotCommand) -> Unit, modifier: Modifier = Modifier) {
+    BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
+        // In the landscape Arena layout this section's height is weighted/bounded, so shrink the
+        // pad to whatever room remains instead of clipping when a sibling card compresses it. In
+        // a scrollable (portrait) context height is unbounded, so just use a comfortable default.
+        val buttonSize = if (maxHeight == Dp.Infinity) {
+            48.dp
+        } else {
+            ((maxHeight - 28.dp) / 4.6f).coerceIn(28.dp, 48.dp)
+        }
         Column(
-            modifier = Modifier.padding(CardInset).fillMaxSize(),
+            modifier = Modifier.fillMaxWidth(),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.SpaceBetween
+            verticalArrangement = Arrangement.spacedBy(SpaceXs)
         ) {
             Text("Manual control", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
-            DrivePad(enabled = enabled, onCommand = onCommand, buttonSize = 42.dp)
+            DrivePad(enabled = enabled, onCommand = onCommand, buttonSize = buttonSize)
         }
     }
 }

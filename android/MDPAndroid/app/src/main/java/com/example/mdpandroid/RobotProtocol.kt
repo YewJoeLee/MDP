@@ -30,4 +30,13 @@ object RobotProtocol {
         "$FACE,$id,${face.code},(${point.x},${point.y})"
 
     fun robotPose(robot: RobotState): String = "$ROBOT,${robot.x},${robot.y},${robot.direction.code}"
+
+    /** Renders every obstacle as one combined line of (id, x, y, "face") tuples — e.g.
+     * [(1, 5, 12, "S"), (2, 14, 16, "W")] — instead of a separate ADD/FACE pair per obstacle. */
+    fun obstacleList(obstacles: List<Obstacle>): String =
+        obstacles.joinToString(prefix = "[", postfix = "]", separator = ", ") { obstacle ->
+            val numericId = obstacle.id.removePrefix("B")
+            val direction = obstacle.targetFace?.code.orEmpty()
+            "($numericId, ${obstacle.x}, ${obstacle.y}, \"$direction\")"
+        }
 }

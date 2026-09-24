@@ -6,11 +6,14 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -19,6 +22,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
@@ -29,10 +34,10 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -46,14 +51,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -94,10 +102,70 @@ internal fun ArenaScreen(
     onClearObstacleTarget: (String) -> Unit,
     onClearObstacleSelection: () -> Unit
 ) {
-    Column(
+    // A landscape tablet is wider than it is tall: lay the workspace out side-by-side so the
+    // whole tab (grid, robot start, drive pad, activity log) fits in view without scrolling,
+    // instead of stacking everything into a column taller than the screen.
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .padding(padding)
+    ) {
+        if (maxWidth > maxHeight) {
+            ArenaScreenLandscape(
+                state = state,
+                onAddObstacle = onAddObstacle,
+                onMoveObstacle = onMoveObstacle,
+                onRemoveObstacle = onRemoveObstacle,
+                onSelectObstacle = onSelectObstacle,
+                onSetObstacleFace = onSetObstacleFace,
+                onSetRobotStart = onSetRobotStart,
+                onSetRobotFace = onSetRobotFace,
+                onSetRobotPose = onSetRobotPose,
+                onSendArena = onSendArena,
+                onClearObstacleTarget = onClearObstacleTarget,
+                onClearObstacleSelection = onClearObstacleSelection
+            )
+        } else {
+            ArenaScreenPortrait(
+                state = state,
+                controlsEnabled = controlsEnabled,
+                onCommand = onCommand,
+                onAddObstacle = onAddObstacle,
+                onMoveObstacle = onMoveObstacle,
+                onRemoveObstacle = onRemoveObstacle,
+                onSelectObstacle = onSelectObstacle,
+                onSetObstacleFace = onSetObstacleFace,
+                onSetRobotStart = onSetRobotStart,
+                onSetRobotFace = onSetRobotFace,
+                onSetRobotPose = onSetRobotPose,
+                onSendArena = onSendArena,
+                onClearObstacleTarget = onClearObstacleTarget,
+                onClearObstacleSelection = onClearObstacleSelection
+            )
+        }
+    }
+}
+
+@Composable
+private fun ArenaScreenPortrait(
+    state: AppState,
+    controlsEnabled: Boolean,
+    onCommand: (RobotCommand) -> Unit,
+    onAddObstacle: (GridPoint) -> Unit,
+    onMoveObstacle: (String, Int, Int) -> Unit,
+    onRemoveObstacle: (String) -> Unit,
+    onSelectObstacle: (String) -> Unit,
+    onSetObstacleFace: (String, Face) -> Unit,
+    onSetRobotStart: (Int, Int) -> Unit,
+    onSetRobotFace: (Face) -> Unit,
+    onSetRobotPose: (Int, Int, Face) -> Unit,
+    onSendArena: () -> Unit,
+    onClearObstacleTarget: (String) -> Unit,
+    onClearObstacleSelection: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
             .verticalScroll(rememberScrollState())
             .padding(
                 start = PageGutter,
@@ -121,25 +189,191 @@ internal fun ArenaScreen(
             onClearObstacleTarget = onClearObstacleTarget,
             onClearObstacleSelection = onClearObstacleSelection
         )
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = CardInset)
-                .height(198.dp),
-            horizontalArrangement = Arrangement.spacedBy(SectionGap)
+                .padding(horizontal = CardInset),
+            verticalArrangement = Arrangement.spacedBy(SpaceSm)
         ) {
-            ArenaDriveCard(
-                enabled = controlsEnabled,
-                onCommand = onCommand,
-                modifier = Modifier.weight(0.9f)
-            )
+            ManualControlSection(enabled = controlsEnabled, onCommand = onCommand)
             RobotActivityCard(
                 statusMessages = state.statusMessages,
                 receivedRawMessages = state.receivedRawLog,
-                modifier = Modifier.weight(1.3f),
-                compact = true,
-                fillHeight = true
+                modifier = Modifier.fillMaxWidth(),
+                boxed = false
             )
+        }
+    }
+}
+
+@Composable
+private fun ArenaScreenLandscape(
+    state: AppState,
+    onAddObstacle: (GridPoint) -> Unit,
+    onMoveObstacle: (String, Int, Int) -> Unit,
+    onRemoveObstacle: (String) -> Unit,
+    onSelectObstacle: (String) -> Unit,
+    onSetObstacleFace: (String, Face) -> Unit,
+    onSetRobotStart: (Int, Int) -> Unit,
+    onSetRobotFace: (Face) -> Unit,
+    onSetRobotPose: (Int, Int, Face) -> Unit,
+    onSendArena: () -> Unit,
+    onClearObstacleTarget: (String) -> Unit,
+    onClearObstacleSelection: () -> Unit
+) {
+    val selected = state.obstacles.firstOrNull { it.id == state.selectedObstacleId }
+    // Flush to the screen's own dimensions — no outer margin — so the map claims every bit of
+    // available space instead of floating inset from the device edges.
+    Row(
+        modifier = Modifier.fillMaxSize(),
+        horizontalArrangement = Arrangement.spacedBy(SectionGap)
+    ) {
+        ArenaWorkspaceCard(
+            state = state,
+            onAddObstacle = onAddObstacle,
+            onMoveObstacle = onMoveObstacle,
+            onSelectObstacle = onSelectObstacle,
+            onSetObstacleFace = onSetObstacleFace,
+            onSetRobotStart = onSetRobotStart,
+            onSetRobotFace = onSetRobotFace,
+            onSendArena = onSendArena,
+            modifier = Modifier
+                .weight(2.4f)
+                .fillMaxHeight()
+        )
+        // A narrow fixed width so the map (above) claims the majority of the screen. Below
+        // TargetFaceSelection's and RobotStartCard's 480dp/560dp breakpoints, so they render
+        // their stacked (not single-row) layouts — still compact, just taller.
+        //
+        // No scroll here: TargetFaceSelection and RobotStartCard size to their content, and the
+        // drive pad / activity row below takes weight(1f) to soak up whatever height remains, so
+        // this column always fits the fixed fillMaxHeight() exactly instead of overflowing it.
+        // (verticalScroll + weight() cannot be combined on the same axis in Compose.)
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxHeight()
+                .padding(top = ArenaTopGutter, end = PageGutter, bottom = PageGutter),
+            verticalArrangement = Arrangement.spacedBy(SectionGap)
+        ) {
+            if (selected != null) {
+                TargetFaceSelection(
+                    obstacle = selected,
+                    onSetObstacleFace = onSetObstacleFace,
+                    onClearObstacleTarget = onClearObstacleTarget,
+                    onRemoveObstacle = onRemoveObstacle,
+                    onDone = onClearObstacleSelection
+                )
+            }
+            RobotStartCard(robot = state.robot, onSetPose = onSetRobotPose)
+            RobotActivityCard(
+                statusMessages = state.statusMessages,
+                receivedRawMessages = state.receivedRawLog,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                compact = true,
+                fillHeight = true,
+                boxed = false
+            )
+        }
+    }
+}
+
+/** Grid-only variant of [ArenaCard] for the landscape layout: sized to fit the available height
+ * (not just width) so the whole Arena tab fits on screen without scrolling. */
+@Composable
+private fun ArenaWorkspaceCard(
+    state: AppState,
+    onAddObstacle: (GridPoint) -> Unit,
+    onMoveObstacle: (String, Int, Int) -> Unit,
+    onSelectObstacle: (String) -> Unit,
+    onSetObstacleFace: (String, Face) -> Unit,
+    onSetRobotStart: (Int, Int) -> Unit,
+    onSetRobotFace: (Face) -> Unit,
+    onSendArena: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    // No card/background — sits directly on the page so the grid can claim the maximum space.
+    Row(
+        modifier = modifier.fillMaxSize(),
+        horizontalArrangement = Arrangement.spacedBy(SpaceSm)
+    ) {
+        ArenaStatusSidebar(state = state, modifier = Modifier.fillMaxHeight())
+        Column(
+            modifier = Modifier.weight(1f).fillMaxHeight(),
+            verticalArrangement = Arrangement.spacedBy(0.dp)
+        ) {
+            // Its own row above the grid — outside the map — rather than floating on top of it.
+            // No gap to the grid below: TextButton's own 40dp minimum height (much taller than
+            // the pill) was what made that gap, not the spacing between them.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(SpaceXs, Alignment.End),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                ConnectionPill(connected = state.connected)
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = MaterialTheme.colorScheme.secondaryContainer
+                ) {
+                    TextButton(
+                        onClick = onSendArena,
+                        modifier = Modifier.height(28.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp)
+                    ) {
+                        Text("SEND ARENA", style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp))
+                    }
+                }
+            }
+            ArenaGrid(
+                state = state,
+                onAddObstacle = onAddObstacle,
+                onMoveObstacle = onMoveObstacle,
+                onSelectObstacle = onSelectObstacle,
+                onSetObstacleFace = onSetObstacleFace,
+                onSetRobotStart = onSetRobotStart,
+                onSetRobotFace = onSetRobotFace,
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+            )
+        }
+    }
+}
+
+/** The vertical counterpart of [ArenaStatusStrip] plus the legend, stacked in a narrow, centered
+ * sidebar to the left of the map instead of a horizontal strip above it, so the grid can use the
+ * full height. */
+@Composable
+private fun ArenaStatusSidebar(state: AppState, modifier: Modifier = Modifier) {
+    val identifiedTargets = state.obstacles.count { it.targetId != null }
+    Surface(
+        modifier = modifier.width(96.dp),
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.secondaryContainer
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(SpaceSm)
+        ) {
+            ArenaMetric("Position", "(${state.robot.x}, ${state.robot.y})", modifier = Modifier.fillMaxWidth())
+            ArenaMetric("Heading", state.robot.direction.code, modifier = Modifier.fillMaxWidth())
+            ArenaMetric("Obstacles", state.obstacles.size.toString(), modifier = Modifier.fillMaxWidth())
+            ArenaMetric("Targets", "$identifiedTargets found", modifier = Modifier.fillMaxWidth())
+            HorizontalDivider()
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(SpaceXs)
+            ) {
+                ArenaLegendItem(ObstacleBlue, "Obstacle")
+                ArenaLegendItem(TargetAmber, "Target")
+                ArenaLegendItem(RobotGreen, "Robot")
+            }
         }
     }
 }
@@ -168,50 +402,35 @@ internal fun ArenaCard(
     onClearObstacleSelection: () -> Unit
 ) {
     val selected = state.obstacles.firstOrNull { it.id == state.selectedObstacleId }
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(24.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-    ) {
-        Column(Modifier.padding(CardInset), verticalArrangement = Arrangement.spacedBy(SectionGap)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("Arena workspace", fontWeight = FontWeight.Bold)
-                    Text("20 × 20 field • ${state.obstacles.size} obstacles placed", style = MaterialTheme.typography.bodySmall)
-                }
-                ConnectionPill(connected = state.connected)
-                TextButton(onClick = onSendArena, contentPadding = PaddingValues(horizontal = SpaceSm, vertical = 0.dp)) {
-                    Text("SYNC ARENA", style = MaterialTheme.typography.labelSmall)
-                }
-            }
-            ArenaStatusStrip(state = state)
-            BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-                // Fill the full card width so the grid is as large and touch-friendly as the
-                // tablet allows.
-                val mapSide = maxWidth
-                ArenaGrid(
-                    state = state,
-                    onAddObstacle = onAddObstacle,
-                    onMoveObstacle = onMoveObstacle,
-                    onSelectObstacle = onSelectObstacle,
-                    onSetObstacleFace = onSetObstacleFace,
-                    onSetRobotStart = onSetRobotStart,
-                    onSetRobotFace = onSetRobotFace,
-                    modifier = Modifier.size(mapSide)
-                )
-            }
-            ArenaLegendRow()
-            if (selected != null) {
-                TargetFaceSelection(
-                    obstacle = selected,
-                    onSetObstacleFace = onSetObstacleFace,
-                    onClearObstacleTarget = onClearObstacleTarget,
-                    onRemoveObstacle = onRemoveObstacle,
-                    onDone = onClearObstacleSelection
-                )
-            }
-            RobotStartCard(robot = state.robot, onSetPose = onSetRobotPose)
+    // No card/background — sits directly on the page so the grid can claim the maximum space.
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(SpaceSm)) {
+        ArenaStatusStrip(state = state)
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+            // Fill the full card width so the grid is as large and touch-friendly as the
+            // tablet allows.
+            val mapSide = maxWidth
+            ArenaGrid(
+                state = state,
+                onAddObstacle = onAddObstacle,
+                onMoveObstacle = onMoveObstacle,
+                onSelectObstacle = onSelectObstacle,
+                onSetObstacleFace = onSetObstacleFace,
+                onSetRobotStart = onSetRobotStart,
+                onSetRobotFace = onSetRobotFace,
+                modifier = Modifier.size(mapSide)
+            )
         }
+        ArenaLegendRow(connected = state.connected, onSendArena = onSendArena)
+        if (selected != null) {
+            TargetFaceSelection(
+                obstacle = selected,
+                onSetObstacleFace = onSetObstacleFace,
+                onClearObstacleTarget = onClearObstacleTarget,
+                onRemoveObstacle = onRemoveObstacle,
+                onDone = onClearObstacleSelection
+            )
+        }
+        RobotStartCard(robot = state.robot, onSetPose = onSetRobotPose)
     }
 }
 
@@ -223,59 +442,59 @@ internal fun TargetFaceSelection(
     onRemoveObstacle: (String) -> Unit,
     onDone: () -> Unit
 ) {
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(16.dp)),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-    ) {
-        BoxWithConstraints(Modifier.fillMaxWidth()) {
-            if (maxWidth >= 480.dp) {
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        if (maxWidth >= 480.dp) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(SpaceXs),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                ObstacleDetails(obstacle, modifier = Modifier.width(112.dp))
+                Text("Face", style = MaterialTheme.typography.labelSmall)
+                FaceChoices(obstacle, onSetObstacleFace)
+                if (obstacle.targetFace != null) {
+                    CompactIconButton(
+                        onClick = { onClearObstacleTarget(obstacle.id) },
+                        icon = Icons.Default.Refresh,
+                        contentDescription = "Clear selected face"
+                    )
+                }
+                Spacer(Modifier.weight(1f))
+                CompactIconButton(onClick = onDone, icon = Icons.Default.Check, contentDescription = "Done selecting target face")
+                CompactIconButton(
+                    onClick = { onRemoveObstacle(obstacle.id) },
+                    icon = Icons.Default.Delete,
+                    contentDescription = "Remove obstacle"
+                )
+            }
+        } else {
+            // Flush: no dead space from full-size (48dp) TextButton/IconButton touch targets, and
+            // the two rows sit right on top of each other (spacedBy(SpaceXs), not SectionGap).
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(SpaceXs)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    ObstacleDetails(obstacle, modifier = Modifier.weight(1f))
+                    CompactIconButton(onClick = onDone, icon = Icons.Default.Check, contentDescription = "Done selecting target face")
+                    CompactIconButton(
+                        onClick = { onRemoveObstacle(obstacle.id) },
+                        icon = Icons.Default.Delete,
+                        contentDescription = "Remove obstacle"
+                    )
+                }
                 Row(
-                    modifier = Modifier.padding(horizontal = CardInset, vertical = SpaceSm),
                     horizontalArrangement = Arrangement.spacedBy(SpaceXs),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    ObstacleDetails(obstacle, modifier = Modifier.width(112.dp))
                     Text("Face", style = MaterialTheme.typography.labelSmall)
                     FaceChoices(obstacle, onSetObstacleFace)
                     if (obstacle.targetFace != null) {
-                        IconButton(onClick = { onClearObstacleTarget(obstacle.id) }) {
-                            Icon(Icons.Default.Refresh, contentDescription = "Clear selected face")
-                        }
-                    }
-                    Spacer(Modifier.weight(1f))
-                    IconButton(onClick = onDone) {
-                        Icon(Icons.Default.Check, contentDescription = "Done selecting target face")
-                    }
-                    IconButton(onClick = { onRemoveObstacle(obstacle.id) }) {
-                        Icon(Icons.Default.Delete, contentDescription = "Remove obstacle")
-                    }
-                }
-            } else {
-                Column(
-                    modifier = Modifier.padding(CardInset),
-                    verticalArrangement = Arrangement.spacedBy(SpaceXs)
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        ObstacleDetails(obstacle, modifier = Modifier.weight(1f))
-                        TextButton(onClick = onDone) { Text("Done") }
-                        IconButton(onClick = { onRemoveObstacle(obstacle.id) }) {
-                            Icon(Icons.Default.Delete, contentDescription = "Remove obstacle")
-                        }
-                    }
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(SpaceXs),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("Face", style = MaterialTheme.typography.labelSmall)
-                        FaceChoices(obstacle, onSetObstacleFace)
-                        if (obstacle.targetFace != null) {
-                            IconButton(onClick = { onClearObstacleTarget(obstacle.id) }) {
-                                Icon(Icons.Default.Refresh, contentDescription = "Clear selected face")
-                            }
-                        }
+                        CompactIconButton(
+                            onClick = { onClearObstacleTarget(obstacle.id) },
+                            icon = Icons.Default.Refresh,
+                            contentDescription = "Clear selected face"
+                        )
                     }
                 }
             }
@@ -283,11 +502,33 @@ internal fun TargetFaceSelection(
     }
 }
 
+/** [IconButton] enforces a 48dp minimum touch target, which is a lot of dead space around a
+ * small glyph in these already-cramped panels — this shrinks that to a still-tappable 32dp. */
+@Composable
+private fun CompactIconButton(
+    onClick: () -> Unit,
+    icon: ImageVector,
+    contentDescription: String,
+    modifier: Modifier = Modifier
+) {
+    IconButton(onClick = onClick, modifier = modifier.size(32.dp)) {
+        Icon(icon, contentDescription = contentDescription, modifier = Modifier.size(18.dp))
+    }
+}
+
 @Composable
 internal fun ObstacleDetails(obstacle: Obstacle, modifier: Modifier = Modifier) {
-    Column(modifier) {
-        Text("Obstacle ${obstacle.id}", fontWeight = FontWeight.SemiBold)
-        Text("(${obstacle.x}, ${obstacle.y})", style = MaterialTheme.typography.bodySmall)
+    // A Box + contentAlignment, not a Row's horizontalArrangement group-alignment — guarantees
+    // centering regardless of how much width the caller's weight()/fixed-width modifier grants.
+    Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        Row(horizontalArrangement = Arrangement.spacedBy(SpaceXs), verticalAlignment = Alignment.Bottom) {
+            Text("Obstacle ${obstacle.id}", fontWeight = FontWeight.SemiBold)
+            Text(
+                "(${obstacle.x}, ${obstacle.y})",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
     }
 }
 
@@ -308,30 +549,30 @@ internal fun FaceChoices(obstacle: Obstacle, onSetObstacleFace: (String, Face) -
 internal fun ConnectionPill(connected: Boolean) {
     Surface(
         shape = RoundedCornerShape(50),
-        color = if (connected) SuccessContainer else MaterialTheme.colorScheme.errorContainer,
-        modifier = Modifier.padding(end = SpaceSm)
+        color = if (connected) SuccessContainer else MaterialTheme.colorScheme.errorContainer
     ) {
         Text(
             if (connected) "LIVE" else "NO LINK",
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
-            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+            style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
             color = if (connected) MissionTeal else MaterialTheme.colorScheme.error,
             fontWeight = FontWeight.Bold
         )
     }
 }
 
-/** A full-width status strip of key metrics, shown above the map instead of a side panel so the map itself can use the full width. */
+/** The "position window": a bigger, more readable status strip of key metrics, shown above the
+ * map instead of a side panel so the map itself can use the full width. */
 @Composable
 internal fun ArenaStatusStrip(state: AppState, modifier: Modifier = Modifier) {
     val identifiedTargets = state.obstacles.count { it.targetId != null }
     Surface(
         modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(18.dp),
         color = MaterialTheme.colorScheme.secondaryContainer
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = CardInset, vertical = SpaceSm),
+            modifier = Modifier.padding(horizontal = 18.dp, vertical = 8.dp),
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             ArenaMetric("Position", "(${state.robot.x}, ${state.robot.y})")
@@ -344,26 +585,57 @@ internal fun ArenaStatusStrip(state: AppState, modifier: Modifier = Modifier) {
 
 @Composable
 internal fun ArenaMetric(label: String, value: String, modifier: Modifier = Modifier) {
-    Column(modifier) {
-        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(value, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center
+        )
+        Text(value, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
     }
 }
 
-/** Legend and interaction hint, shown as a single row under the map instead of a side panel. */
+/** Legend plus the connection/sync status that used to sit in a header row above the map — moved
+ * here so the map itself can claim that vertical space. Falls back to two lines when the card is
+ * too narrow (the landscape Arena layout's grid column) for everything to fit on one. */
 @Composable
-internal fun ArenaLegendRow(modifier: Modifier = Modifier) {
-    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(SpaceXs)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(SpaceSm)) {
-            ArenaLegendItem(ObstacleBlue, "Obstacle")
-            ArenaLegendItem(TargetAmber, "Target")
-            ArenaLegendItem(RobotGreen, "Robot")
+internal fun ArenaLegendRow(
+    connected: Boolean,
+    onSendArena: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    BoxWithConstraints(modifier.fillMaxWidth()) {
+        if (maxWidth >= 520.dp) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(SpaceSm)
+            ) {
+                Row(modifier = Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(SpaceSm)) {
+                    ArenaLegendItem(ObstacleBlue, "Obstacle")
+                    ArenaLegendItem(TargetAmber, "Target")
+                    ArenaLegendItem(RobotGreen, "Robot")
+                }
+                ConnectionPill(connected = connected)
+                TextButton(onClick = onSendArena, contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)) {
+                    Text("SEND ARENA", style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp))
+                }
+            }
+        } else {
+            Column(verticalArrangement = Arrangement.spacedBy(SpaceXs)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(SpaceSm)) {
+                    ArenaLegendItem(ObstacleBlue, "Obstacle")
+                    ArenaLegendItem(TargetAmber, "Target")
+                    ArenaLegendItem(RobotGreen, "Robot")
+                }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(SpaceSm)) {
+                    ConnectionPill(connected = connected)
+                    TextButton(onClick = onSendArena, contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)) {
+                        Text("SYNC ARENA", style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp))
+                    }
+                }
+            }
         }
-        Text(
-            "Tap to add an obstacle. Short-drag to set a face; drag the robot to set its start.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
     }
 }
 
@@ -382,16 +654,20 @@ internal fun ArenaGrid(
     val gutter = 18.dp
     val labelStyle = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp, textAlign = TextAlign.Center)
     BoxWithConstraints(modifier = modifier) {
-        val canvasSide = (minOf(maxWidth, maxHeight) - gutter).coerceAtLeast(1.dp)
-        val cellSize = canvasSide / MAP_COLUMNS
+        // Independent width/height (not forced to a square) so the grid fills whatever space the
+        // caller gives it edge-to-edge instead of centering a smaller square inside it.
+        val canvasWidth = (maxWidth - gutter).coerceAtLeast(1.dp)
+        val canvasHeight = (maxHeight - gutter).coerceAtLeast(1.dp)
+        val cellWidth = canvasWidth / MAP_COLUMNS
+        val cellHeight = canvasHeight / MAP_ROWS
         Column {
-            Row(Modifier.height(canvasSide)) {
-                Column(Modifier.width(gutter).height(canvasSide)) {
+            Row(Modifier.height(canvasHeight)) {
+                Column(Modifier.width(gutter).height(canvasHeight)) {
                     for (y in MAP_ROWS - 1 downTo 0) {
                         Text(
                             text = y.toString(),
                             style = labelStyle,
-                            modifier = Modifier.height(cellSize).fillMaxWidth()
+                            modifier = Modifier.height(cellHeight).fillMaxWidth()
                         )
                     }
                 }
@@ -403,15 +679,45 @@ internal fun ArenaGrid(
                     onSetObstacleFace = onSetObstacleFace,
                     onSetRobotStart = onSetRobotStart,
                     onSetRobotFace = onSetRobotFace,
-                    modifier = Modifier.size(canvasSide)
+                    modifier = Modifier.size(canvasWidth, canvasHeight)
                 )
             }
             Row(Modifier.padding(start = gutter).height(gutter)) {
                 for (x in 0 until MAP_COLUMNS) {
-                    Text(x.toString(), style = labelStyle, modifier = Modifier.width(cellSize))
+                    Text(x.toString(), style = labelStyle, modifier = Modifier.width(cellWidth))
                 }
             }
         }
+    }
+}
+
+/** A bordered [BasicTextField] instead of Material3's OutlinedTextField — no built-in minimum
+ * touch target, so it hugs the digit instead of leaving a lot of empty space in the box. */
+@Composable
+private fun CompactNumberField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier
+            .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(8.dp))
+            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp))
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        BasicTextField(
+            value = value,
+            onValueChange = onValueChange,
+            singleLine = true,
+            textStyle = MaterialTheme.typography.titleMedium.copy(
+                color = MaterialTheme.colorScheme.onSurface,
+                textAlign = TextAlign.Center
+            ),
+            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            modifier = Modifier.fillMaxWidth()
+        )
     }
 }
 
@@ -425,28 +731,41 @@ internal fun RobotStartCard(robot: RobotState, onSetPose: (Int, Int, Face) -> Un
         val y = yText.toIntOrNull()
         if (x != null && y != null) onSetPose(x, y, direction)
     }
-    val positionFields = @Composable {
-        OutlinedTextField(
+    // OutlinedTextField can't shrink below its own ~56dp minimum touch target even with the
+    // label removed, which is what left the box mostly empty around the digit — a bordered
+    // BasicTextField has no such floor, so it hugs the text instead.
+    val positionFields: @Composable RowScope.() -> Unit = {
+        Text("X", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.CenterVertically))
+        CompactNumberField(
             value = xText,
             onValueChange = { xText = it.filter(Char::isDigit).take(2) },
-            label = { Text("X") },
-            singleLine = true,
-            modifier = Modifier.width(68.dp)
+            modifier = Modifier.weight(1f)
         )
-        OutlinedTextField(
+        Text("Y", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.CenterVertically))
+        CompactNumberField(
             value = yText,
             onValueChange = { yText = it.filter(Char::isDigit).take(2) },
-            label = { Text("Y") },
-            singleLine = true,
-            modifier = Modifier.width(68.dp)
+            modifier = Modifier.weight(1f)
         )
     }
-    val directionChips = @Composable {
+    val setButton = @Composable {
+        Button(
+            onClick = setPose,
+            modifier = Modifier.height(32.dp),
+            contentPadding = PaddingValues(horizontal = SpaceSm, vertical = 0.dp)
+        ) {
+            Text("Set", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+        }
+    }
+    // Chips stretch to evenly fill whatever width the caller gives this row, rather than
+    // clumping to the left, so "Robot  N E S W" spans the full card width.
+    val directionChips: @Composable RowScope.() -> Unit = {
         Face.entries.forEach { face ->
             FilterChip(
                 selected = direction == face,
                 onClick = { direction = face },
                 label = { Text(face.code, fontWeight = FontWeight.Bold) },
+                modifier = Modifier.weight(1f),
                 // The card's own surfaceVariant background matches FilterChip's default selected
                 // fill closely enough that the selection becomes invisible; force real contrast.
                 colors = FilterChipDefaults.filterChipColors(
@@ -456,45 +775,24 @@ internal fun RobotStartCard(robot: RobotState, onSetPose: (Int, Int, Face) -> Un
             )
         }
     }
-    Card(
+    Column(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+        verticalArrangement = Arrangement.spacedBy(SpaceXs)
     ) {
-        BoxWithConstraints(Modifier.fillMaxWidth()) {
-            if (maxWidth >= 560.dp) {
-                Row(
-                    modifier = Modifier.padding(horizontal = CardInset, vertical = SpaceSm),
-                    horizontalArrangement = Arrangement.spacedBy(SpaceSm),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("Robot start", fontWeight = FontWeight.SemiBold)
-                        Text("Set grid position and facing", style = MaterialTheme.typography.bodySmall)
-                    }
-                    positionFields()
-                    Row(horizontalArrangement = Arrangement.spacedBy(SpaceXs)) { directionChips() }
-                    Button(onClick = setPose) { Text("Set") }
-                }
-            } else {
-                Column(
-                    modifier = Modifier.padding(CardInset),
-                    verticalArrangement = Arrangement.spacedBy(SpaceXs)
-                ) {
-                    Text("Robot start", fontWeight = FontWeight.SemiBold)
-                    Text("Set grid position and facing", style = MaterialTheme.typography.bodySmall)
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(SpaceSm),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        positionFields()
-                        Spacer(Modifier.weight(1f))
-                        Button(onClick = setPose) { Text("Set") }
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(SpaceXs)) { directionChips() }
-                }
-            }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(SpaceSm),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Robot", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+            positionFields()
+            setButton()
         }
+        // Flush against the row above (spacedBy(SpaceXs), not a full SectionGap).
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(SpaceXs)
+        ) { directionChips() }
     }
 }
 

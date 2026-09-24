@@ -2,6 +2,7 @@ package com.example.mdpandroid.ui
 
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -32,19 +33,22 @@ internal fun RobotActivityCard(
     receivedRawMessages: List<StatusMessage>,
     modifier: Modifier = Modifier,
     compact: Boolean = false,
-    fillHeight: Boolean = false
+    fillHeight: Boolean = false,
+    boxed: Boolean = true
 ) {
     val logEntries = mergeActivityLog(statusMessages, receivedRawMessages)
-    Card(
-        modifier = modifier
-            .fillMaxWidth()
-            .then(if (fillHeight) Modifier.fillMaxHeight() else Modifier)
-            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(20.dp)),
-        shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-    ) {
-        Column(Modifier.padding(CardInset), verticalArrangement = Arrangement.spacedBy(SectionGap)) {
-            Text("Robot activity", fontWeight = FontWeight.Bold)
+    val content = @Composable {
+        Column(
+            modifier = Modifier
+                .then(if (boxed) Modifier.padding(CardInset) else Modifier)
+                .then(if (fillHeight) Modifier.fillMaxHeight() else Modifier),
+            verticalArrangement = Arrangement.spacedBy(if (boxed) SectionGap else SpaceXs)
+        ) {
+            Text(
+                "Robot activity",
+                style = if (boxed) MaterialTheme.typography.bodyLarge else MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.Bold
+            )
             if (!compact) {
                 Text(
                     "One chronological log for run status and incoming Bluetooth text.",
@@ -55,7 +59,11 @@ internal fun RobotActivityCard(
             if (logEntries.isEmpty()) {
                 Text("No robot activity yet.", style = MaterialTheme.typography.bodySmall)
             } else {
-                LazyColumn(modifier = Modifier.height(if (compact) 124.dp else 180.dp), reverseLayout = true) {
+                // When the card's own height is constrained by a sibling (fillHeight), let the
+                // list take whatever room remains instead of forcing a fixed height that could
+                // overflow the card's bounds and get clipped.
+                val listModifier = if (fillHeight) Modifier.weight(1f) else Modifier.height(if (compact) 124.dp else 180.dp)
+                LazyColumn(modifier = listModifier, reverseLayout = true) {
                     items(logEntries.asReversed()) { entry ->
                         Row(modifier = Modifier.padding(vertical = 2.dp), verticalAlignment = Alignment.Top) {
                             Text(
@@ -76,6 +84,26 @@ internal fun RobotActivityCard(
                     }
                 }
             }
+        }
+    }
+    if (boxed) {
+        Card(
+            modifier = modifier
+                .fillMaxWidth()
+                .then(if (fillHeight) Modifier.fillMaxHeight() else Modifier)
+                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(20.dp)),
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        ) {
+            content()
+        }
+    } else {
+        Box(
+            modifier = modifier
+                .fillMaxWidth()
+                .then(if (fillHeight) Modifier.fillMaxHeight() else Modifier)
+        ) {
+            content()
         }
     }
 }
