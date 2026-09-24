@@ -594,7 +594,7 @@ class BluetoothController(private val context: Context) {
                 is ProtocolMessage.Text -> addStatus(message.text)
                 is ProtocolMessage.Target -> state = state.copy(obstacles = applyTargetRecognition(state.obstacles, message))
                 is ProtocolMessage.Robot -> {
-                    val update = remoteRobotPose(message.x, message.y, message.direction, state.obstacles)
+                    val update = remoteRobotPose(message.x, message.y, message.direction ?: state.robot.direction, state.obstacles)
                     state = state.copy(robot = update.pose)
                     update.conflictingObstacle?.let { addStatus(RobotMessages.remoteRobotConflict(it)) }
                 }
