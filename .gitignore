@@ -1,0 +1,12 @@
+# Android Studio / IntelliJ project metadata
+.idea/
+*.iml
+
+# Local and generated files
+.DS_Store
+tmp/
+
+# Android build and machine-local configuration
+.gradle/
+**/build/
+**/local.properties
