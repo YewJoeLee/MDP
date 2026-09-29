@@ -939,13 +939,15 @@ int Drive_Distance(int32_t dist_cm, int dir)
     osDelay(CTRL_PERIOD_MS);
     elapsed += CTRL_PERIOD_MS;
   }
-
+  int32_t brakeA = travA;
+  int32_t brakeB = travB;
   MotorA_Set(0);
   MotorB_Set(0);
 
   /* keep measuring while it rolls to a stop */
   for (int i = 0; i < 10; i++)
   {
+	Enc_Update(dir);
     float gz = IMU_GetGyroZ_Raw() - gyro_bias_z;
     uint32_t t_now = HAL_GetTick();
     float dt = (t_now - t_old) * 0.001f;
@@ -959,6 +961,13 @@ int Drive_Distance(int32_t dist_cm, int dir)
   heading_err += yaw * GYRO_SCALE;
   if (heading_err >  HEADING_ERR_MAX) heading_err =  HEADING_ERR_MAX;
   if (heading_err < -HEADING_ERR_MAX) heading_err = -HEADING_ERR_MAX;
+
+  {
+    char t[64];
+    int n = sprintf(t, "BRAKE A:%ld B:%ld  FINAL A:%ld B:%ld\r\n",
+                    brakeA, brakeB, travA, travB);
+    HAL_UART_Transmit(&huart3, (uint8_t *)t, n, 100);
+  }
 
   return reason;
 }
@@ -1045,6 +1054,53 @@ int32_t US_Median_mm(void)
     v[j + 1] = k;
   }
   return v[n / 2];
+}
+
+/* ---------- Sharp GP2Y0A21YK0F : IR1 = PC1 (ch11), IR2 = PC2 (ch12) ---------- */
+static uint32_t IR_ReadRaw(uint32_t channel)
+{
+  ADC_ChannelConfTypeDef s = {0};
+  s.Channel = channel;
+  s.Rank = 1;
+  s.SamplingTime = ADC_SAMPLETIME_144CYCLES;
+  if (HAL_ADC_ConfigChannel(&hadc1, &s) != HAL_OK) return 0;
+
+  HAL_ADC_Start(&hadc1);
+  if (HAL_ADC_PollForConversion(&hadc1, 20) != HAL_OK) {
+    HAL_ADC_Stop(&hadc1);
+    return 0;
+  }
+  uint32_t v = HAL_ADC_GetValue(&hadc1);
+  HAL_ADC_Stop(&hadc1);
+  return v;                                   /* 0..4095 */
+}
+
+/* median of 5 raw readings; which = 1 or 2 */
+uint32_t IR_ReadADC(int which)
+{
+  uint32_t ch = (which == 1) ? ADC_CHANNEL_11 : ADC_CHANNEL_12;
+  uint32_t v[5];
+  for (int i = 0; i < 5; i++) { v[i] = IR_ReadRaw(ch); osDelay(5); }
+  for (int i = 1; i < 5; i++) {
+    uint32_t k = v[i]; int j = i - 1;
+    while (j >= 0 && v[j] > k) { v[j + 1] = v[j]; j--; }
+    v[j + 1] = k;
+  }
+  return v[2];
+}
+
+/* CALIBRATE THESE from your own readings (see below) */
+#define IR_K       30088.0f
+#define IR_OFFSET  133.0f
+
+/* distance in mm, or -1 if out of the sensor's usable range */
+int32_t IR_Read_mm(int which)
+{
+  float raw = (float)IR_ReadADC(which);
+  if (raw <= IR_OFFSET + 1.0f) return -1;        /* too far / no reading */
+  float cm = IR_K / (raw - IR_OFFSET);
+  if (cm < 8.0f || cm > 80.0f) return -1;        /* outside spec */
+  return (int32_t)(cm * 10.0f);
 }
 
 void Gyro_CalibrateZBias(void)
@@ -1395,6 +1451,13 @@ void StartDefaultTask(void *argument)
         int n = sprintf(tx, "DONE %s UNDID:%ld\r\n", p, back);
         HAL_UART_Transmit(&huart3, (uint8_t *)tx, n, 100);
       }
+      else if ((p[0] == 'I' || p[0] == 'i') && (p[1] == 'R' || p[1] == 'r'))
+      {
+        int n = sprintf(tx, "IR1 raw:%lu mm:%ld  IR2 raw:%lu mm:%ld\r\n",
+                        IR_ReadADC(1), IR_Read_mm(1),
+                        IR_ReadADC(2), IR_Read_mm(2));
+        HAL_UART_Transmit(&huart3, (uint8_t *)tx, n, 100);
+      }
       else
       {
         int n = sprintf(tx, "ERR UNKNOWN [%s]\r\n", p);
@@ -1405,6 +1468,7 @@ void StartDefaultTask(void *argument)
   }
   /* USER CODE END 5 */
 }
+
 /* USER CODE BEGIN Header_show */
 /**
 * @brief Function implementing the showTask thread.
