@@ -34,6 +34,7 @@ object RobotMessages {
     fun obstaclePlaced(id: String, point: GridPoint): String = "$id placed at (${point.x},${point.y})"
     fun obstacleRemovedRemotely(id: String): String = "$id removed (from remote)"
     fun obstacleFaceSetRemotely(id: String, face: Face): String = "$id face ${face.code} set (from remote)"
+    fun targetObstacleMissing(id: String): String = "Target ignored: $id is not on the arena"
     fun remoteObstacleIgnored(id: String, point: GridPoint): String =
         "Ignored $id at (${point.x},${point.y}): robot is there"
     fun remoteObstaclePlaced(id: String, point: GridPoint): String =

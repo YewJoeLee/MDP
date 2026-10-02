@@ -1,6 +1,7 @@
 package com.example.mdpandroid
 
 import kotlin.math.abs
+import java.io.Serializable
 
 internal const val MAP_COLUMNS = 20
 internal const val MAP_ROWS = 20
@@ -29,10 +30,10 @@ enum class Face(val code: String, val dx: Int, val dy: Int) {
 }
 
 data class RobotState(
-    val x: Int = 6,
-    val y: Int = 2,
-    val direction: Face = Face.W
-)
+    val x: Int = 1,
+    val y: Int = 1,
+    val direction: Face = Face.N
+) : Serializable
 
 /** The robot occupies a square footprint centered on (x,y); a radius of 1 means 3x3. */
 const val ROBOT_FOOTPRINT_RADIUS = 1
@@ -52,7 +53,7 @@ data class Obstacle(
     val y: Int,
     val targetId: String? = null,
     val targetFace: Face? = null
-)
+) : Serializable
 
 /** A monotonic [order] keeps the combined activity view faithful when events share a timestamp. */
 data class StatusMessage(val time: String, val text: String, val order: Long = 0)
@@ -71,7 +72,7 @@ fun mergeActivityLog(
 
 sealed interface ProtocolMessage {
     data class Text(val text: String) : ProtocolMessage
-    data class Target(val obstacleId: String, val targetId: String, val face: Face?) : ProtocolMessage
+    data class Target(val obstacleId: String, val targetId: String, val face: Face? = null) : ProtocolMessage
     data class Robot(val x: Int, val y: Int, val direction: Face?) : ProtocolMessage
 
 }
@@ -83,7 +84,10 @@ fun parseProtocolMessage(line: String): ProtocolMessage? {
         RobotProtocol.TARGET -> {
             val id = parts.getOrNull(1)?.let(::canonicalObstacleId) ?: return null
             val target = parts.getOrNull(2)?.takeIf { it.isNotBlank() } ?: return null
-            ProtocolMessage.Target(id, target)
+            val face = parts.getOrNull(3)?.let { rawFace ->
+                Face.entries.firstOrNull { it.code == rawFace.uppercase() } ?: return null
+            }
+            ProtocolMessage.Target(id, target, face)
         }
         RobotProtocol.ROBOT -> {
             val x = parts.getOrNull(1)?.toIntOrNull() ?: return null
@@ -102,14 +106,16 @@ fun canonicalObstacleId(rawId: String): String {
     return if (cleaned.startsWith("B")) cleaned else "B$cleaned"
 }
 
-fun applyTargetRecognition(obstacles: List<Obstacle>, message: ProtocolMessage.Target): List<Obstacle> =
-    obstacles.map { obstacle ->
+data class TargetRecognitionUpdate(val obstacles: List<Obstacle>, val matched: Boolean)
+
+fun applyTargetRecognition(obstacles: List<Obstacle>, message: ProtocolMessage.Target): TargetRecognitionUpdate =
+    TargetRecognitionUpdate(obstacles.map { obstacle ->
         if (obstacle.id.equals(message.obstacleId, ignoreCase = true)) {
-            obstacle.copy(targetId = message.targetId)
+            obstacle.copy(targetId = message.targetId, targetFace = message.face ?: obstacle.targetFace)
         } else {
             obstacle
         }
-    }
+    }, obstacles.any { it.id.equals(message.obstacleId, ignoreCase = true) })
 
 fun clearObstacleFace(obstacles: List<Obstacle>, id: String): List<Obstacle> =
     obstacles.map { obstacle -> if (obstacle.id == id) obstacle.copy(targetFace = null) else obstacle }

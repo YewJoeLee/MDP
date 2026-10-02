@@ -31,6 +31,9 @@ object RobotProtocol {
 
     fun robotPose(robot: RobotState): String = "$ROBOT,${robot.x},${robot.y},${robot.direction.code}"
 
+    /** Existing Pi receiver expects one obstacle-list payload, with no ROBOT prefix. */
+    fun arenaSetup(obstacles: List<Obstacle>): List<String> = listOf(obstacleList(obstacles))
+
     /** Renders every obstacle as one combined line of (id, x, y, "face") tuples — e.g.
      * [(1, 5, 12, "S"), (2, 14, 16, "W")] — instead of a separate ADD/FACE pair per obstacle. */
     fun obstacleList(obstacles: List<Obstacle>): String =

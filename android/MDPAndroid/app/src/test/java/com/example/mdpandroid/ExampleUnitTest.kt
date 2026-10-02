@@ -3,6 +3,7 @@ package com.example.mdpandroid
 import org.junit.Test
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 
@@ -10,14 +11,42 @@ class ProtocolAndActivityTest {
     @Test
     fun targetRecognitionAcceptsNumericObstacleIdsAndKeepsKnownFaceWhenNoneIsProvided() {
         val message = parseProtocolMessage("TARGET,1,12") as ProtocolMessage.Target
-        val obstacles = applyTargetRecognition(
+        val update = applyTargetRecognition(
             listOf(Obstacle(id = "B1", x = 10, y = 10, targetFace = Face.E)),
             message
         )
 
         assertEquals("B1", message.obstacleId)
-        assertEquals("12", obstacles.single().targetId)
-        assertEquals(Face.E, obstacles.single().targetFace)
+        assertNull(message.face)
+        assertTrue(update.matched)
+        assertEquals("12", update.obstacles.single().targetId)
+        assertEquals(Face.E, update.obstacles.single().targetFace)
+    }
+
+    @Test
+    fun targetRecognitionUsesFaceOnlyWhenItIsProvided() {
+        val message = parseProtocolMessage("TARGET,1,12,N") as ProtocolMessage.Target
+        val update = applyTargetRecognition(
+            listOf(Obstacle(id = "B1", x = 10, y = 10, targetFace = Face.E)),
+            message
+        )
+
+        assertEquals(Face.N, message.face)
+        assertTrue(update.matched)
+        assertEquals("12", update.obstacles.single().targetId)
+        assertEquals(Face.N, update.obstacles.single().targetFace)
+    }
+
+    @Test
+    fun targetForMissingObstacleIsReportedInsteadOfSilentlyApplied() {
+        val existing = listOf(Obstacle(id = "B1", x = 10, y = 10))
+
+        val update = applyTargetRecognition(
+            existing, parseProtocolMessage("TARGET,2,11") as ProtocolMessage.Target
+        )
+
+        assertFalse(update.matched)
+        assertEquals(existing, update.obstacles)
     }
 
     @Test

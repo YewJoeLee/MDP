@@ -9,8 +9,9 @@ fun robotOverlapsObstacle(robot: RobotState, obstacles: List<Obstacle>): Obstacl
     obstacles.firstOrNull { robot.occupies(it.x, it.y) }
 
 fun localRobotPose(x: Int, y: Int, direction: Face, obstacles: List<Obstacle>): RobotState? {
-    val center = clampRobotCenter(x, y)
-    val pose = RobotState(center.x, center.y, direction)
+    if (x !in ROBOT_FOOTPRINT_RADIUS until MAP_COLUMNS - ROBOT_FOOTPRINT_RADIUS ||
+        y !in ROBOT_FOOTPRINT_RADIUS until MAP_ROWS - ROBOT_FOOTPRINT_RADIUS) return null
+    val pose = RobotState(x, y, direction)
     return pose.takeUnless { robotOverlapsObstacle(it, obstacles) != null }
 }
 

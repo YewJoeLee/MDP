@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -20,6 +21,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -30,6 +32,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -84,7 +87,7 @@ internal fun ControlCard(enabled: Boolean, onCommand: (RobotCommand) -> Unit) {
                 Text(if (enabled) "READY" else "OFFLINE", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
             }
             Text(
-                "The map follows manual input and is corrected by confirmed ROBOT updates.",
+                "The map follows sent drive commands and is corrected by ROBOT updates.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -207,9 +210,26 @@ internal fun AssessmentCommandCard(
                     Text("Task 2\nFastest path")
                 }
             }
-            OutlinedButton(onClick = onSendArena, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
-                Text("Send current arena to robot")
-            }
+            SendArenaButton(enabled = enabled, onSendArena = onSendArena, modifier = Modifier.fillMaxWidth())
         }
+    }
+}
+
+/** Same send action, connection gate and touch target in both Arena and Controls. */
+@Composable
+internal fun SendArenaButton(
+    enabled: Boolean,
+    onSendArena: () -> Unit,
+    modifier: Modifier = Modifier,
+    label: String = "Send current arena to robot",
+    contentPadding: PaddingValues = ButtonDefaults.ContentPadding
+) {
+    OutlinedButton(
+        onClick = onSendArena,
+        enabled = enabled,
+        modifier = modifier.heightIn(min = 48.dp),
+        contentPadding = contentPadding
+    ) {
+        Text(label, textAlign = TextAlign.Center)
     }
 }

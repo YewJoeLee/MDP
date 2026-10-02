@@ -45,6 +45,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -66,6 +68,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.mdpandroid.AppState
+import com.example.mdpandroid.ArenaGestureAction
 import com.example.mdpandroid.Face
 import com.example.mdpandroid.GridPoint
 import com.example.mdpandroid.MAP_COLUMNS
@@ -75,6 +78,7 @@ import com.example.mdpandroid.ROBOT_FOOTPRINT_RADIUS
 import com.example.mdpandroid.RobotState
 import com.example.mdpandroid.RobotCommand
 import com.example.mdpandroid.faceFromDrag
+import com.example.mdpandroid.classifyArenaGesture
 import com.example.mdpandroid.gridPoint
 import com.example.mdpandroid.occupies
 import com.example.mdpandroid.ui.theme.MissionError
@@ -102,6 +106,15 @@ internal fun ArenaScreen(
     onClearObstacleTarget: (String) -> Unit,
     onClearObstacleSelection: () -> Unit
 ) {
+    var robotSettingsVisible by rememberSaveable { mutableStateOf(false) }
+    val selectRobot = {
+        onClearObstacleSelection()
+        robotSettingsVisible = true
+    }
+    val selectObstacle: (String) -> Unit = { id ->
+        robotSettingsVisible = false
+        onSelectObstacle(id)
+    }
     // A landscape tablet is wider than it is tall: lay the workspace out side-by-side so the
     // whole tab (grid, robot start, drive pad, activity log) fits in view without scrolling,
     // instead of stacking everything into a column taller than the screen.
@@ -116,11 +129,14 @@ internal fun ArenaScreen(
                 onAddObstacle = onAddObstacle,
                 onMoveObstacle = onMoveObstacle,
                 onRemoveObstacle = onRemoveObstacle,
-                onSelectObstacle = onSelectObstacle,
+                onSelectObstacle = selectObstacle,
                 onSetObstacleFace = onSetObstacleFace,
                 onSetRobotStart = onSetRobotStart,
                 onSetRobotFace = onSetRobotFace,
                 onSetRobotPose = onSetRobotPose,
+                robotSettingsVisible = robotSettingsVisible,
+                onSelectRobot = selectRobot,
+                onCloseRobotSettings = { robotSettingsVisible = false },
                 onSendArena = onSendArena,
                 onClearObstacleTarget = onClearObstacleTarget,
                 onClearObstacleSelection = onClearObstacleSelection
@@ -133,11 +149,14 @@ internal fun ArenaScreen(
                 onAddObstacle = onAddObstacle,
                 onMoveObstacle = onMoveObstacle,
                 onRemoveObstacle = onRemoveObstacle,
-                onSelectObstacle = onSelectObstacle,
+                onSelectObstacle = selectObstacle,
                 onSetObstacleFace = onSetObstacleFace,
                 onSetRobotStart = onSetRobotStart,
                 onSetRobotFace = onSetRobotFace,
                 onSetRobotPose = onSetRobotPose,
+                robotSettingsVisible = robotSettingsVisible,
+                onSelectRobot = selectRobot,
+                onCloseRobotSettings = { robotSettingsVisible = false },
                 onSendArena = onSendArena,
                 onClearObstacleTarget = onClearObstacleTarget,
                 onClearObstacleSelection = onClearObstacleSelection
@@ -159,6 +178,9 @@ private fun ArenaScreenPortrait(
     onSetRobotStart: (Int, Int) -> Unit,
     onSetRobotFace: (Face) -> Unit,
     onSetRobotPose: (Int, Int, Face) -> Unit,
+    robotSettingsVisible: Boolean,
+    onSelectRobot: () -> Unit,
+    onCloseRobotSettings: () -> Unit,
     onSendArena: () -> Unit,
     onClearObstacleTarget: (String) -> Unit,
     onClearObstacleSelection: () -> Unit
@@ -185,6 +207,9 @@ private fun ArenaScreenPortrait(
             onSetRobotStart = onSetRobotStart,
             onSetRobotFace = onSetRobotFace,
             onSetRobotPose = onSetRobotPose,
+            robotSettingsVisible = robotSettingsVisible,
+            onSelectRobot = onSelectRobot,
+            onCloseRobotSettings = onCloseRobotSettings,
             onSendArena = onSendArena,
             onClearObstacleTarget = onClearObstacleTarget,
             onClearObstacleSelection = onClearObstacleSelection
@@ -217,6 +242,9 @@ private fun ArenaScreenLandscape(
     onSetRobotStart: (Int, Int) -> Unit,
     onSetRobotFace: (Face) -> Unit,
     onSetRobotPose: (Int, Int, Face) -> Unit,
+    robotSettingsVisible: Boolean,
+    onSelectRobot: () -> Unit,
+    onCloseRobotSettings: () -> Unit,
     onSendArena: () -> Unit,
     onClearObstacleTarget: (String) -> Unit,
     onClearObstacleSelection: () -> Unit
@@ -236,19 +264,14 @@ private fun ArenaScreenLandscape(
             onSetObstacleFace = onSetObstacleFace,
             onSetRobotStart = onSetRobotStart,
             onSetRobotFace = onSetRobotFace,
+            onSelectRobot = onSelectRobot,
             onSendArena = onSendArena,
             modifier = Modifier
                 .weight(2.4f)
                 .fillMaxHeight()
         )
-        // A narrow fixed width so the map (above) claims the majority of the screen. Below
-        // TargetFaceSelection's and RobotStartCard's 480dp/560dp breakpoints, so they render
-        // their stacked (not single-row) layouts — still compact, just taller.
-        //
-        // No scroll here: TargetFaceSelection and RobotStartCard size to their content, and the
-        // drive pad / activity row below takes weight(1f) to soak up whatever height remains, so
-        // this column always fits the fixed fillMaxHeight() exactly instead of overflowing it.
-        // (verticalScroll + weight() cannot be combined on the same axis in Compose.)
+        // Keep the selected object's settings compact so the map has most of the width.
+        // The activity log takes the remaining height when settings open or close.
         Column(
             modifier = Modifier
                 .weight(1f)
@@ -265,7 +288,13 @@ private fun ArenaScreenLandscape(
                     onDone = onClearObstacleSelection
                 )
             }
-            RobotStartCard(robot = state.robot, onSetPose = onSetRobotPose)
+            if (robotSettingsVisible) {
+                RobotStartCard(
+                    robot = state.robot,
+                    onSetPose = onSetRobotPose,
+                    onCloseSettings = onCloseRobotSettings
+                )
+            }
             RobotActivityCard(
                 statusMessages = state.statusMessages,
                 receivedRawMessages = state.receivedRawLog,
@@ -291,6 +320,7 @@ private fun ArenaWorkspaceCard(
     onSetObstacleFace: (String, Face) -> Unit,
     onSetRobotStart: (Int, Int) -> Unit,
     onSetRobotFace: (Face) -> Unit,
+    onSelectRobot: () -> Unit,
     onSendArena: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -299,46 +329,19 @@ private fun ArenaWorkspaceCard(
         modifier = modifier.fillMaxSize(),
         horizontalArrangement = Arrangement.spacedBy(SpaceSm)
     ) {
-        ArenaStatusSidebar(state = state, modifier = Modifier.fillMaxHeight())
-        Column(
-            modifier = Modifier.weight(1f).fillMaxHeight(),
-            verticalArrangement = Arrangement.spacedBy(0.dp)
-        ) {
-            // Its own row above the grid — outside the map — rather than floating on top of it.
-            // No gap to the grid below: TextButton's own 40dp minimum height (much taller than
-            // the pill) was what made that gap, not the spacing between them.
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(SpaceXs, Alignment.End),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                ConnectionPill(connected = state.connected)
-                Surface(
-                    shape = RoundedCornerShape(50),
-                    color = MaterialTheme.colorScheme.secondaryContainer
-                ) {
-                    TextButton(
-                        onClick = onSendArena,
-                        modifier = Modifier.height(28.dp),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp)
-                    ) {
-                        Text("SEND ARENA", style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp))
-                    }
-                }
-            }
-            ArenaGrid(
-                state = state,
-                onAddObstacle = onAddObstacle,
-                onMoveObstacle = onMoveObstacle,
-                onSelectObstacle = onSelectObstacle,
-                onSetObstacleFace = onSetObstacleFace,
-                onSetRobotStart = onSetRobotStart,
-                onSetRobotFace = onSetRobotFace,
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-            )
-        }
+        ArenaStatusSidebar(state = state, onSendArena = onSendArena, modifier = Modifier.fillMaxHeight())
+        // The grid owns the entire available height; ArenaGrid reserves its axis-label gutter.
+        ArenaGrid(
+            state = state,
+            onAddObstacle = onAddObstacle,
+            onMoveObstacle = onMoveObstacle,
+            onSelectObstacle = onSelectObstacle,
+            onSetObstacleFace = onSetObstacleFace,
+            onSetRobotStart = onSetRobotStart,
+            onSetRobotFace = onSetRobotFace,
+            onSelectRobot = onSelectRobot,
+            modifier = Modifier.weight(1f).fillMaxHeight()
+        )
     }
 }
 
@@ -346,7 +349,7 @@ private fun ArenaWorkspaceCard(
  * sidebar to the left of the map instead of a horizontal strip above it, so the grid can use the
  * full height. */
 @Composable
-private fun ArenaStatusSidebar(state: AppState, modifier: Modifier = Modifier) {
+private fun ArenaStatusSidebar(state: AppState, onSendArena: () -> Unit, modifier: Modifier = Modifier) {
     val identifiedTargets = state.obstacles.count { it.targetId != null }
     Surface(
         modifier = modifier.width(96.dp),
@@ -374,6 +377,15 @@ private fun ArenaStatusSidebar(state: AppState, modifier: Modifier = Modifier) {
                 ArenaLegendItem(TargetAmber, "Target")
                 ArenaLegendItem(RobotGreen, "Robot")
             }
+            HorizontalDivider()
+            ConnectionPill(connected = state.connected)
+            SendArenaButton(
+                enabled = state.connected || state.demoMode,
+                onSendArena = onSendArena,
+                modifier = Modifier.fillMaxWidth(),
+                label = "Send\narena",
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
+            )
         }
     }
 }
@@ -397,6 +409,9 @@ internal fun ArenaCard(
     onSetRobotStart: (Int, Int) -> Unit,
     onSetRobotFace: (Face) -> Unit,
     onSetRobotPose: (Int, Int, Face) -> Unit,
+    robotSettingsVisible: Boolean,
+    onSelectRobot: () -> Unit,
+    onCloseRobotSettings: () -> Unit,
     onSendArena: () -> Unit,
     onClearObstacleTarget: (String) -> Unit,
     onClearObstacleSelection: () -> Unit
@@ -417,10 +432,15 @@ internal fun ArenaCard(
                 onSetObstacleFace = onSetObstacleFace,
                 onSetRobotStart = onSetRobotStart,
                 onSetRobotFace = onSetRobotFace,
+                onSelectRobot = onSelectRobot,
                 modifier = Modifier.size(mapSide)
             )
         }
-        ArenaLegendRow(connected = state.connected, onSendArena = onSendArena)
+        ArenaLegendRow(
+            connected = state.connected,
+            enabled = state.connected || state.demoMode,
+            onSendArena = onSendArena
+        )
         if (selected != null) {
             TargetFaceSelection(
                 obstacle = selected,
@@ -430,7 +450,13 @@ internal fun ArenaCard(
                 onDone = onClearObstacleSelection
             )
         }
-        RobotStartCard(robot = state.robot, onSetPose = onSetRobotPose)
+        if (robotSettingsVisible) {
+            RobotStartCard(
+                robot = state.robot,
+                onSetPose = onSetRobotPose,
+                onCloseSettings = onCloseRobotSettings
+            )
+        }
     }
 }
 
@@ -602,6 +628,7 @@ internal fun ArenaMetric(label: String, value: String, modifier: Modifier = Modi
 @Composable
 internal fun ArenaLegendRow(
     connected: Boolean,
+    enabled: Boolean,
     onSendArena: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -617,9 +644,7 @@ internal fun ArenaLegendRow(
                     ArenaLegendItem(RobotGreen, "Robot")
                 }
                 ConnectionPill(connected = connected)
-                TextButton(onClick = onSendArena, contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)) {
-                    Text("SEND ARENA", style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp))
-                }
+                SendArenaButton(enabled = enabled, onSendArena = onSendArena, label = "Send arena")
             }
         } else {
             Column(verticalArrangement = Arrangement.spacedBy(SpaceXs)) {
@@ -630,9 +655,7 @@ internal fun ArenaLegendRow(
                 }
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(SpaceSm)) {
                     ConnectionPill(connected = connected)
-                    TextButton(onClick = onSendArena, contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)) {
-                        Text("SYNC ARENA", style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp))
-                    }
+                    SendArenaButton(enabled = enabled, onSendArena = onSendArena, label = "Send arena")
                 }
             }
         }
@@ -649,6 +672,7 @@ internal fun ArenaGrid(
     onSetObstacleFace: (String, Face) -> Unit,
     onSetRobotStart: (Int, Int) -> Unit,
     onSetRobotFace: (Face) -> Unit,
+    onSelectRobot: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val gutter = 18.dp
@@ -679,6 +703,7 @@ internal fun ArenaGrid(
                     onSetObstacleFace = onSetObstacleFace,
                     onSetRobotStart = onSetRobotStart,
                     onSetRobotFace = onSetRobotFace,
+                    onSelectRobot = onSelectRobot,
                     modifier = Modifier.size(canvasWidth, canvasHeight)
                 )
             }
@@ -722,7 +747,11 @@ private fun CompactNumberField(
 }
 
 @Composable
-internal fun RobotStartCard(robot: RobotState, onSetPose: (Int, Int, Face) -> Unit) {
+internal fun RobotStartCard(
+    robot: RobotState,
+    onSetPose: (Int, Int, Face) -> Unit,
+    onCloseSettings: () -> Unit
+) {
     var xText by remember(robot.x) { mutableStateOf(robot.x.toString()) }
     var yText by remember(robot.y) { mutableStateOf(robot.y.toString()) }
     var direction by remember(robot.direction) { mutableStateOf(robot.direction) }
@@ -781,10 +810,17 @@ internal fun RobotStartCard(robot: RobotState, onSetPose: (Int, Int, Face) -> Un
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Robot settings", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.weight(1f))
+            TextButton(onClick = onCloseSettings) { Text("Close") }
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(SpaceSm),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("Robot", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
             positionFields()
             setButton()
         }
@@ -807,66 +843,88 @@ internal fun ArenaCanvas(
     onSetObstacleFace: (String, Face) -> Unit,
     onSetRobotStart: (Int, Int) -> Unit,
     onSetRobotFace: (Face) -> Unit,
+    onSelectRobot: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var dragKind by remember { mutableStateOf<DragKind?>(null) }
     var dragObstacleId by remember { mutableStateOf<String?>(null) }
     var dragOffset by remember { mutableStateOf<Offset?>(null) }
+    val latestState by rememberUpdatedState(state)
+    val latestOnAddObstacle by rememberUpdatedState(onAddObstacle)
+    val latestOnMoveObstacle by rememberUpdatedState(onMoveObstacle)
+    val latestOnSelectObstacle by rememberUpdatedState(onSelectObstacle)
+    val latestOnSetObstacleFace by rememberUpdatedState(onSetObstacleFace)
+    val latestOnSetRobotStart by rememberUpdatedState(onSetRobotStart)
+    val latestOnSetRobotFace by rememberUpdatedState(onSetRobotFace)
+    val latestOnSelectRobot by rememberUpdatedState(onSelectRobot)
     Canvas(
         modifier = modifier
             .background(Color(0xFFEAF4F5), RoundedCornerShape(16.dp))
             .border(1.dp, Color(0xFFA9BEC9), RoundedCornerShape(16.dp))
-            .pointerInput(state.obstacles, state.robot) {
+            .pointerInput(Unit) {
                 awaitEachGesture {
-                    val down = awaitFirstDown()
-                    val start = down.position
-                    val startPoint = gridPoint(start, size.width.toFloat(), size.height.toFloat())
-                    val obstacleId = state.obstacles.firstOrNull { it.x == startPoint.x && it.y == startPoint.y }?.id
-                    val robotSelected = obstacleId == null && state.robot.occupies(startPoint.x, startPoint.y)
-                    var current = start
-                    var moved = false
+                    try {
+                        val down = awaitFirstDown()
+                        val start = down.position
+                        val startPoint = gridPoint(start, size.width.toFloat(), size.height.toFloat())
+                        val startState = latestState
+                        val obstacleId = startState.obstacles.firstOrNull { it.x == startPoint.x && it.y == startPoint.y }?.id
+                        val robotSelected = obstacleId == null && startState.robot.occupies(startPoint.x, startPoint.y)
+                        var current = start
+                        var moved = false
+                        var released = false
 
-                    while (true) {
-                        val event = awaitPointerEvent()
-                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                        if (change.positionChanged()) {
-                            change.consume()
-                            current = change.position
-                            moved = true
-                            when {
-                                obstacleId != null -> {
-                                    dragKind = DragKind.OBSTACLE
-                                    dragObstacleId = obstacleId
-                                    dragOffset = current
-                                }
-                                robotSelected -> {
-                                    dragKind = DragKind.ROBOT
-                                    dragOffset = current
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                            // A parent consuming the gesture cancels this drag, just like disposal.
+                            if (change.isConsumed) break
+                            if (change.positionChanged()) {
+                                change.consume()
+                                current = change.position
+                                moved = true
+                                when {
+                                    obstacleId != null -> {
+                                        dragKind = DragKind.OBSTACLE
+                                        dragObstacleId = obstacleId
+                                        dragOffset = current
+                                    }
+                                    robotSelected -> {
+                                        dragKind = DragKind.ROBOT
+                                        dragOffset = current
+                                    }
                                 }
                             }
-                        }
-                        if (!change.pressed) break
-                    }
-
-                    val releasedAt = gridPoint(current, size.width.toFloat(), size.height.toFloat())
-                    val distance = (current - start).getDistance()
-                    val cellSize = minOf(size.width, size.height).toFloat() / MAP_COLUMNS
-                    val isTap = !moved || distance < 6.dp.toPx()
-                    val isNudge = !isTap && distance < cellSize * 0.65f
-                    dragKind = null
-                    dragObstacleId = null
-                    dragOffset = null
-                    when {
-                        isTap -> {
-                            when {
-                                obstacleId != null -> onSelectObstacle(obstacleId)
-                                !robotSelected && startPoint.x in 0 until MAP_COLUMNS && startPoint.y in 0 until MAP_ROWS -> onAddObstacle(startPoint)
+                            if (!change.pressed) {
+                                released = true
+                                break
                             }
                         }
-                        obstacleId != null && isNudge -> onSetObstacleFace(obstacleId, faceFromDrag(current - start))
-                        obstacleId != null -> onMoveObstacle(obstacleId, releasedAt.x, releasedAt.y)
-                        robotSelected && isNudge -> onSetRobotFace(faceFromDrag(current - start))
-                        robotSelected -> onSetRobotStart(releasedAt.x, releasedAt.y)
+
+                        if (!released) return@awaitEachGesture
+                        // A map reset or deletion during the hold must not act on a removed obstacle.
+                        if (obstacleId != null && latestState.obstacles.none { it.id == obstacleId }) return@awaitEachGesture
+                        val releasedAt = gridPoint(current, size.width.toFloat(), size.height.toFloat())
+                        val distance = (current - start).getDistance()
+                        val cellSize = minOf(size.width, size.height).toFloat() / MAP_COLUMNS
+                        val action = classifyArenaGesture(moved, distance, 6.dp.toPx(), cellSize, releasedAt, obstacleId != null)
+                        when {
+                            action == ArenaGestureAction.TAP -> {
+                                when {
+                                    obstacleId != null -> latestOnSelectObstacle(obstacleId)
+                                    robotSelected -> latestOnSelectRobot()
+                                    !robotSelected && startPoint.x in 0 until MAP_COLUMNS && startPoint.y in 0 until MAP_ROWS -> latestOnAddObstacle(startPoint)
+                                }
+                            }
+                            obstacleId != null && action == ArenaGestureAction.FACE -> latestOnSetObstacleFace(obstacleId, faceFromDrag(current - start))
+                            obstacleId != null -> latestOnMoveObstacle(obstacleId, releasedAt.x, releasedAt.y)
+                            robotSelected && action == ArenaGestureAction.FACE -> latestOnSetRobotFace(faceFromDrag(current - start))
+                            robotSelected -> latestOnSetRobotStart(releasedAt.x, releasedAt.y)
+                        }
+                    } finally {
+                        dragKind = null
+                        dragObstacleId = null
+                        dragOffset = null
                     }
                 }
             }

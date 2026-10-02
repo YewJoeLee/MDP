@@ -60,7 +60,7 @@ fun ARCMApp(
 ) {
     val state = controller.state
     var showDevices by remember { mutableStateOf(false) }
-    var demoMode by remember { mutableStateOf(false) }
+    val demoMode = state.demoMode
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
 
     DisposableEffect(controller) {
@@ -102,12 +102,10 @@ fun ARCMApp(
         }
     ) { padding ->
         val onCommand: (RobotCommand) -> Unit = { command ->
-            controller.moveRobot(command, sendToRobot = !demoMode)
-            if (demoMode) controller.addStatus(RobotMessages.demoCommand(command))
+            controller.moveRobot(command)
         }
         val onSendArena: () -> Unit = {
-            if (demoMode) controller.addStatus(RobotMessages.ARENA_SYNC_PREPARED)
-            else controller.sendArenaSnapshot()
+            controller.sendArenaSnapshot()
         }
         when (AppTab.entries[selectedTab]) {
             AppTab.OVERVIEW -> ScreenColumn(padding) {
@@ -115,7 +113,7 @@ fun ARCMApp(
                 ConnectionCard(
                     state = state,
                     demoMode = demoMode,
-                    onDemoModeChange = { demoMode = it },
+                    onDemoModeChange = controller::setDemoMode,
                     onScan = {
                         if (demoMode) controller.addStatus(RobotMessages.DEMO_SCAN_SKIPPED)
                         else requestBluetoothPermissions()

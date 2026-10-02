@@ -29,6 +29,7 @@ data class AppState(
     val connectedAddress: String? = null,
     val selectedDeviceName: String? = null,
     val connected: Boolean = false,
+    val demoMode: Boolean = false,
     val scanning: Boolean = false,
     val connectionStatus: String = "Disconnected",
     val connectionDetail: String = "Select a device, or use Demo mode to test the interface.",
@@ -49,13 +50,12 @@ class BluetoothController(private val context: Context) {
         private const val CONNECT_TIMEOUT_MS = 12_000L
         private const val SCAN_TIMEOUT_MS = 18_000L
         private const val SERVER_RETRY_DELAY_MS = 5_000L
-        private const val INCOMING_IDLE_FLUSH_MS = 100L
         private const val SERVICE_NAME = "MDPAndroid"
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val connectionExecutor = Executors.newCachedThreadPool()
-    private val writeExecutor = Executors.newSingleThreadExecutor()
+    private val commandWriter = CommandWriter()
     private val adapter: BluetoothAdapter? =
         (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
     private val socketLock = Any()
@@ -73,9 +73,9 @@ class BluetoothController(private val context: Context) {
     @Volatile private var listening = false
     private var scanTimeoutRunnable: Runnable? = null
     private var reconnectAttempt = 0
-    private val incomingBuffer = StringBuilder()
-    private var incomingFlushRunnable: Runnable? = null
+    private val incomingFramer = IncomingMessageFramer { addStatus("Incoming message too long; discarded until the next newline") }
     private var nextLogOrder = 0L
+    private var manualMovePending = false
 
     var state by mutableStateOf(AppState())
         private set
@@ -166,8 +166,18 @@ class BluetoothController(private val context: Context) {
         state = state.copy(selectedObstacleId = null)
     }
 
+    fun setDemoMode(enabled: Boolean) {
+        if (enabled && state.connected) return
+        if (enabled) disconnect() // Cancel retries before practising locally.
+        state = state.copy(demoMode = enabled)
+    }
+
     @SuppressLint("MissingPermission")
     fun connect(deviceInfo: BluetoothDeviceInfo) {
+        if (state.demoMode) {
+            addStatus("Leave Demo mode before connecting")
+            return
+        }
         if (!hasBluetoothPermission()) {
             addStatus(RobotMessages.PERMISSION_REQUIRED_TO_CONNECT)
             return
@@ -296,17 +306,12 @@ class BluetoothController(private val context: Context) {
     private fun beginSession(newSocket: BluetoothSocket, deviceInfo: BluetoothDeviceInfo, sessionId: Long) {
         lastDevice = newSocket.remoteDevice
         reconnectAttempt = 0
-        mainHandler.post { resetIncomingBuffer() }
         mainHandler.post {
             if (!isCurrentSession(sessionId, newSocket)) return@post
-            state = state.copy(
-                selectedDevice = deviceInfo,
-                selectedDeviceName = deviceInfo.name ?: deviceInfo.address,
-                connected = true,
-                connectedAddress = deviceInfo.address,
-                connectionStatus = "Connected",
-                connectionDetail = RobotMessages.connectedTo(deviceInfo.name ?: deviceInfo.address)
-            )
+            resetIncomingBuffer()
+            val wasDemo = state.demoMode
+            state = state.connectedTo(deviceInfo)
+            if (wasDemo) addStatus("Demo mode ended: live Bluetooth connection established")
             addStatus(RobotMessages.BLUETOOTH_CONNECTION_ESTABLISHED)
         }
         readLoop(newSocket, sessionId)
@@ -331,43 +336,96 @@ class BluetoothController(private val context: Context) {
         addStatus(RobotMessages.BLUETOOTH_DISCONNECTED)
     }
 
-    fun moveRobot(command: RobotCommand, sendToRobot: Boolean = true) {
-        nextRobotPose(command, state.robot)?.let { candidate ->
+    fun moveRobot(command: RobotCommand) {
+        val original = state.robot
+        val candidate = nextRobotPose(command, original)
+        if (candidate != null) {
             val updated = localRobotPose(candidate.x, candidate.y, candidate.direction, state.obstacles)
             if (updated == null) {
-                robotOverlapsObstacle(candidate, state.obstacles)?.let {
-                    addStatus(RobotMessages.robotPoseBlocked(it))
-                }
+                reportRobotPoseBlocked(candidate.x, candidate.y, candidate.direction)
                 return
             }
-            state = state.copy(robot = updated)
+            if (state.demoMode) {
+                state = state.copy(robot = updated)
+                addStatus(RobotMessages.demoCommand(command))
+                return
+            }
+            if (manualMovePending) {
+                addStatus("Previous drive command is still being sent; wait or press Stop")
+                return
+            }
+            manualMovePending = true
+            sendCommands(listOf(RobotProtocol.command(command)), onFinished = { manualMovePending = false }) {
+                // A remote pose received during the write takes precedence over the prediction.
+                if (state.robot == original) state = state.copy(robot = updated)
+            }
+            return
         }
-        if (sendToRobot) send(RobotProtocol.command(command))
+        if (state.demoMode) addStatus(RobotMessages.demoCommand(command))
+        else send(RobotProtocol.command(command))
     }
 
-    /**
-     * AMDTOOL compares received command text against its configured command token. Keep the
-     * payload exact by default; callers that need a line-based robot protocol can opt in to a
-     * terminator explicitly.
-     */
-    fun send(command: String, appendLineTerminator: Boolean = false) {
+    private fun send(command: String) = sendCommands(listOf(command))
+
+    private fun sendCommands(commands: List<String>, onFinished: (() -> Unit)? = null, onSent: (() -> Unit)? = null) {
+        if (commands.isEmpty()) return
+        if (state.demoMode) {
+            addStatus("Demo only: ${commands.joinToString("; ")}")
+            onFinished?.invoke()
+            return
+        }
         val connection = synchronized(socketLock) { Triple(socket, output, activeSessionId) }
         val currentSocket = connection.first
         val currentOutput = connection.second
         val sessionId = connection.third
         if (!state.connected || currentSocket == null || currentOutput == null) {
-            addStatus(RobotMessages.commandNotSent(command))
+            addStatus(RobotMessages.commandNotSent(commands.joinToString("; ")))
+            onFinished?.invoke()
             return
         }
-        writeExecutor.execute {
-            try {
-                val payload = command.trim() + if (appendLineTerminator) "\n" else ""
-                currentOutput.write(payload.toByteArray(Charsets.UTF_8))
-                currentOutput.flush()
-                mainHandler.post { addStatus(RobotMessages.commandSent(command)) }
-            } catch (_: IOException) {
-                mainHandler.post { markConnectionLost("Connection lost while sending", sessionId, currentSocket) }
+        val accepted = commandWriter.enqueue(WriteRequest(
+            isCurrent = { !closed && isCurrentSession(sessionId, currentSocket) },
+            write = {
+                for (command in commands) {
+                    if (!isCurrentSession(sessionId, currentSocket)) throw IOException("Session ended")
+                    currentOutput.write(ConnectionProtocol.payload(command).toByteArray(Charsets.UTF_8))
+                    currentOutput.flush()
+                }
+            },
+            onSuccess = {
+                mainHandler.post {
+                    if (isCurrentSession(sessionId, currentSocket)) {
+                        commands.forEach { addStatus(RobotMessages.commandSent(it)) }
+                        onSent?.invoke()
+                    }
+                    onFinished?.invoke()
+                }
+            },
+            onFailure = {
+                mainHandler.post {
+                    onFinished?.invoke()
+                    markConnectionLost("Connection lost while sending; command not confirmed", sessionId, currentSocket)
+                }
+            },
+            onTimeout = {
+                // Closing RFCOMM aborts the blocked write; never report this request as sent.
+                try { currentSocket.close() } catch (_: IOException) { }
+                mainHandler.post {
+                    onFinished?.invoke()
+                    addStatus("Bluetooth send timed out; command delivery is unknown. Check the robot before restarting.")
+                    markConnectionLost("Bluetooth send timed out", sessionId, currentSocket)
+                }
+            },
+            onCancelled = {
+                mainHandler.post {
+                    onFinished?.invoke()
+                    if (isCurrentSession(sessionId, currentSocket)) addStatus("Pending command cancelled: ${commands.joinToString("; ")}")
+                }
             }
+        ), urgent = commands.singleOrNull() == RobotProtocol.command(RobotCommand.STOP))
+        if (!accepted) {
+            onFinished?.invoke()
+            addStatus("Send queue full; command not sent: ${commands.joinToString("; ")}")
         }
     }
 
@@ -381,87 +439,78 @@ class BluetoothController(private val context: Context) {
         val nextNumber = (state.obstacles.mapNotNull { it.id.removePrefix("B").toIntOrNull() }.maxOrNull() ?: 0) + 1
         val obstacle = Obstacle("B$nextNumber", point.x, point.y)
         state = state.copy(obstacles = state.obstacles + obstacle, selectedObstacleId = obstacle.id)
-        send(RobotProtocol.addObstacle(obstacle.id, point))
     }
 
     fun moveObstacle(id: String, x: Int, y: Int) {
-        val obstacle = state.obstacles.firstOrNull { it.id == id } ?: return
-        val invalidTarget = x !in 0 until MAP_COLUMNS || y !in 0 until MAP_ROWS ||
-            state.obstacles.any { it.id != id && it.x == x && it.y == y } ||
-            state.robot.occupies(x, y)
-        if (invalidTarget) {
-            removeObstacle(id)
-            return
-        }
-        state = state.copy(obstacles = state.obstacles.map { if (it.id == id) it.copy(x = x, y = y) else it }, selectedObstacleId = id)
-        val point = GridPoint(x, y)
-        send(RobotProtocol.addObstacle(id, point))
-        if (obstacle.x != x || obstacle.y != y) addStatus(RobotMessages.obstaclePlaced(id, point))
+        val change = planObstacleMove(state, id, GridPoint(x, y))
+        state = change.state
+        change.message?.let(::addStatus)
     }
 
     fun removeObstacle(id: String) {
         if (state.obstacles.none { it.id == id }) return
         state = state.copy(obstacles = state.obstacles.filterNot { it.id == id }, selectedObstacleId = null)
-        send(RobotProtocol.removeObstacle(id))
     }
 
     fun setObstacleFace(id: String, face: Face) {
-        val obstacle = state.obstacles.firstOrNull { it.id == id } ?: return
+        if (state.obstacles.none { it.id == id }) return
         state = state.copy(obstacles = state.obstacles.map { if (it.id == id) it.copy(targetFace = face) else it }, selectedObstacleId = id)
-        send(RobotProtocol.setObstacleFace(id, face, GridPoint(obstacle.x, obstacle.y)))
     }
 
     fun clearObstacleTarget(id: String) {
-        state = state.copy(obstacles = clearObstacleFace(state.obstacles, id))
-        addStatus(RobotMessages.selectedFaceCleared(id))
+        val change = planClearObstacleFace(state, id)
+        state = change.state
+        change.message?.let(::addStatus)
     }
 
-    /** Updates the configured robot start position and syncs it to the remote side. */
+    /** Updates the local start position used to display and validate the arena. */
     fun setRobotStart(x: Int, y: Int) {
         val robot = localRobotPose(x, y, state.robot.direction, state.obstacles) ?: run {
             reportRobotPoseBlocked(x, y, state.robot.direction)
             return
         }
         state = state.copy(robot = robot)
-        send(RobotProtocol.robotPose(robot))
         addStatus(RobotMessages.robotStartSet(robot))
     }
 
-    /** Updates the configured robot facing direction and syncs it to the remote side. */
+    /** Updates the local facing direction used to display the robot. */
     fun setRobotFace(face: Face) {
         val robot = localRobotPose(state.robot.x, state.robot.y, face, state.obstacles) ?: run {
             reportRobotPoseBlocked(state.robot.x, state.robot.y, face)
             return
         }
         state = state.copy(robot = robot)
-        send(RobotProtocol.robotPose(robot))
         addStatus(RobotMessages.robotFacingSet(face))
     }
 
-    /** Sets the robot's full starting pose (position + facing) in one update and syncs it to the remote side. */
+    /** Sets the robot's local starting pose without sending a separate ROBOT message. */
     fun setRobotPose(x: Int, y: Int, direction: Face) {
         val robot = localRobotPose(x, y, direction, state.obstacles) ?: run {
             reportRobotPoseBlocked(x, y, direction)
             return
         }
         state = state.copy(robot = robot)
-        send(RobotProtocol.robotPose(robot))
         addStatus(RobotMessages.robotPoseSet(robot))
     }
 
     private fun reportRobotPoseBlocked(x: Int, y: Int, direction: Face) {
-        val center = clampRobotCenter(x, y)
-        val candidate = RobotState(center.x, center.y, direction)
+        val candidate = RobotState(x, y, direction)
+        if (x !in ROBOT_FOOTPRINT_RADIUS until MAP_COLUMNS - ROBOT_FOOTPRINT_RADIUS ||
+            y !in ROBOT_FOOTPRINT_RADIUS until MAP_ROWS - ROBOT_FOOTPRINT_RADIUS) {
+            addStatus("Robot pose rejected: its footprint must stay inside the arena")
+            return
+        }
         robotOverlapsObstacle(candidate, state.obstacles)?.let {
             addStatus(RobotMessages.robotPoseBlocked(it))
         }
     }
 
-    /** Sends the current obstacles as one combined list line, instead of a separate ADD/FACE
-     * pair per obstacle. Robot pose isn't included — only the obstacle layout. */
+    /** Send the complete obstacle list using the original working Pi format. */
     fun sendArenaSnapshot() {
-        send(RobotProtocol.obstacleList(state.obstacles))
-        addStatus(RobotMessages.arenaSetupSent(state.obstacles.size))
+        val obstacleCount = state.obstacles.size
+        sendCommands(RobotProtocol.arenaSetup(state.obstacles), onSent = {
+            addStatus(RobotMessages.arenaSetupSent(obstacleCount))
+        })
     }
 
     fun addStatus(message: String) {
@@ -480,6 +529,10 @@ class BluetoothController(private val context: Context) {
 
     fun deviceName(info: BluetoothDeviceInfo): String = info.name ?: info.address
 
+    fun restoreArena(snapshot: ArenaSnapshot) {
+        state = state.withArenaSnapshot(snapshot)
+    }
+
     fun close() {
         closed = true
         cancelReconnect()
@@ -497,7 +550,7 @@ class BluetoothController(private val context: Context) {
             registered = false
         }
         connectionExecutor.shutdownNow()
-        writeExecutor.shutdownNow()
+        commandWriter.close()
     }
 
     /**
@@ -531,15 +584,7 @@ class BluetoothController(private val context: Context) {
         }
     }
 
-    /**
-     * Some test tools (e.g. the AMD Tool) write a message without a trailing newline, which makes
-     * a strict [BufferedReader.readLine] block forever waiting for a delimiter that never arrives.
-     * Read whatever bytes are available instead: split on newlines when present (so a
-     * newline-terminated protocol still works and multiple messages in one packet are separated),
-     * and flush a non-terminated message after a short idle period. The idle period prevents a
-     * message split across multiple Bluetooth packets from being parsed and discarded halfway
-     * through.
-     */
+    /** Read chunks without assuming that one RFCOMM read equals one complete message. */
     private fun readLoop(connectedSocket: BluetoothSocket, sessionId: Long) {
         val buffer = ByteArray(1024)
         try {
@@ -557,7 +602,6 @@ class BluetoothController(private val context: Context) {
         } finally {
             mainHandler.post {
                 if (isCurrentSession(sessionId, connectedSocket)) {
-                    flushIncomingBuffer()
                     markConnectionLost(RobotMessages.BLUETOOTH_DEVICE_DISCONNECTED, sessionId, connectedSocket)
                 }
             }
@@ -592,7 +636,14 @@ class BluetoothController(private val context: Context) {
             }
             else -> when (val message = parseProtocolMessage(line)) {
                 is ProtocolMessage.Text -> addStatus(message.text)
-                is ProtocolMessage.Target -> state = state.copy(obstacles = applyTargetRecognition(state.obstacles, message))
+                is ProtocolMessage.Target -> {
+                    val update = applyTargetRecognition(state.obstacles, message)
+                    if (update.matched) {
+                        state = state.copy(obstacles = update.obstacles)
+                    } else {
+                        addStatus(RobotMessages.targetObstacleMissing(message.obstacleId))
+                    }
+                }
                 is ProtocolMessage.Robot -> {
                     val update = remoteRobotPose(message.x, message.y, message.direction ?: state.robot.direction, state.obstacles)
                     state = state.copy(robot = update.pose)
@@ -664,6 +715,7 @@ class BluetoothController(private val context: Context) {
             }
         }
         if (!relevant || closed) return
+        resetIncomingBuffer()
         state = state.copy(connected = false, connectedAddress = null, connectionStatus = "Disconnected", connectionDetail = detail)
         addStatus(detail)
         scheduleReconnect()
@@ -676,7 +728,7 @@ class BluetoothController(private val context: Context) {
         state = state.copy(connectionDetail = RobotMessages.waitingToReconnect(device.address))
         val retry = Runnable {
             if (!closed && lastDevice != null && !state.connected) {
-                connect(state.selectedDevice ?: toInfo(device))
+                connect(toInfo(device))
             }
         }
         reconnectAttempt += 1
@@ -697,6 +749,7 @@ class BluetoothController(private val context: Context) {
         pendingSocket = null
         socket = null
         output = null
+        commandWriter.cancelPending()
     }
 
     private fun setPendingSocket(candidate: BluetoothSocket, attemptId: Long) {
@@ -747,40 +800,11 @@ class BluetoothController(private val context: Context) {
         synchronized(socketLock) { activeSessionId == sessionId && socket === expectedSocket }
 
     private fun consumeIncomingChunk(chunk: String) {
-        incomingBuffer.append(chunk)
-        while (true) {
-            var delimiterIndex = -1
-            for (index in 0 until incomingBuffer.length) {
-                if (incomingBuffer[index] == '\n' || incomingBuffer[index] == '\r') {
-                    delimiterIndex = index
-                    break
-                }
-            }
-            if (delimiterIndex < 0) break
-            incomingBuffer.substring(0, delimiterIndex).trim().takeIf { it.isNotEmpty() }?.let(::parseIncoming)
-            incomingBuffer.delete(0, delimiterIndex + 1)
-            while (incomingBuffer.isNotEmpty() && (incomingBuffer[0] == '\n' || incomingBuffer[0] == '\r')) {
-                incomingBuffer.deleteCharAt(0)
-            }
-        }
-        if (incomingBuffer.isNotEmpty()) {
-            incomingFlushRunnable?.let(mainHandler::removeCallbacks)
-            val flush = Runnable { flushIncomingBuffer() }
-            incomingFlushRunnable = flush
-            mainHandler.postDelayed(flush, INCOMING_IDLE_FLUSH_MS)
-        }
-    }
-
-    private fun flushIncomingBuffer() {
-        incomingFlushRunnable = null
-        incomingBuffer.toString().trim().takeIf { it.isNotEmpty() }?.let(::parseIncoming)
-        incomingBuffer.clear()
+        incomingFramer.append(chunk).forEach(::parseIncoming)
     }
 
     private fun resetIncomingBuffer() {
-        incomingFlushRunnable?.let(mainHandler::removeCallbacks)
-        incomingFlushRunnable = null
-        incomingBuffer.clear()
+        incomingFramer.reset()
     }
 
     private fun registerReceiver() {

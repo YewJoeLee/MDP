@@ -35,10 +35,10 @@ class ArenaRulesAndProtocolTest {
     }
 
     @Test
-    fun localRobotPoseClampsToTheWholeFootprintBoundary() {
+    fun localRobotPoseRejectsAnOutOfBoundsFootprint() {
         val pose = localRobotPose(x = 0, y = 20, direction = Face.W, obstacles = emptyList())
 
-        assertEquals(RobotState(x = 1, y = 18, direction = Face.W), pose)
+        assertNull(pose)
     }
 
     @Test

@@ -7,11 +7,17 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
 import androidx.core.content.ContextCompat
 import com.example.mdpandroid.ui.ARCMApp
 import com.example.mdpandroid.ui.theme.MDPAndroidTheme
 
 class MainActivity : ComponentActivity() {
+    private companion object {
+        const val ARENA_STATE_KEY = "arena_state"
+    }
+
+    private val robotSession: RobotSessionViewModel by viewModels()
     private lateinit var bluetoothController: BluetoothController
 
     private val permissionLauncher = registerForActivityResult(
@@ -28,7 +34,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        bluetoothController = BluetoothController(applicationContext)
+        @Suppress("DEPRECATION")
+        val savedArena = savedInstanceState?.getSerializable(ARENA_STATE_KEY) as? ArenaSnapshot
+        bluetoothController = robotSession.controller(applicationContext, savedArena)
         setContent {
             MDPAndroidTheme {
                 ARCMApp(bluetoothController, ::requestBluetoothPermissions)
@@ -54,8 +62,10 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onDestroy() {
-        if (::bluetoothController.isInitialized) bluetoothController.close()
-        super.onDestroy()
+    override fun onSaveInstanceState(outState: Bundle) {
+        if (::bluetoothController.isInitialized) {
+            outState.putSerializable(ARENA_STATE_KEY, bluetoothController.state.arenaSnapshot())
+        }
+        super.onSaveInstanceState(outState)
     }
 }
