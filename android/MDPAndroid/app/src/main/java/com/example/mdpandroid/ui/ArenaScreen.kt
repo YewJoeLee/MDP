@@ -68,6 +68,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.mdpandroid.AppState
+import com.example.mdpandroid.arenaLocked
+import com.example.mdpandroid.canSendArena
+import com.example.mdpandroid.description
 import com.example.mdpandroid.ArenaGestureAction
 import com.example.mdpandroid.Face
 import com.example.mdpandroid.GridPoint
@@ -279,7 +282,8 @@ private fun ArenaScreenLandscape(
                 .padding(top = ArenaTopGutter, end = PageGutter, bottom = PageGutter),
             verticalArrangement = Arrangement.spacedBy(SectionGap)
         ) {
-            if (selected != null) {
+            state.taskRun?.let { Text(it.description(), style = MaterialTheme.typography.bodySmall) }
+            if (selected != null && !state.arenaLocked) {
                 TargetFaceSelection(
                     obstacle = selected,
                     onSetObstacleFace = onSetObstacleFace,
@@ -288,7 +292,7 @@ private fun ArenaScreenLandscape(
                     onDone = onClearObstacleSelection
                 )
             }
-            if (robotSettingsVisible) {
+            if (robotSettingsVisible && !state.arenaLocked) {
                 RobotStartCard(
                     robot = state.robot,
                     onSetPose = onSetRobotPose,
@@ -380,7 +384,7 @@ private fun ArenaStatusSidebar(state: AppState, onSendArena: () -> Unit, modifie
             HorizontalDivider()
             ConnectionPill(connected = state.connected)
             SendArenaButton(
-                enabled = state.connected || state.demoMode,
+                enabled = state.canSendArena,
                 onSendArena = onSendArena,
                 modifier = Modifier.fillMaxWidth(),
                 label = "Send\narena",
@@ -438,10 +442,11 @@ internal fun ArenaCard(
         }
         ArenaLegendRow(
             connected = state.connected,
-            enabled = state.connected || state.demoMode,
+            enabled = state.canSendArena,
             onSendArena = onSendArena
         )
-        if (selected != null) {
+        state.taskRun?.let { Text(it.description(), style = MaterialTheme.typography.bodySmall) }
+        if (selected != null && !state.arenaLocked) {
             TargetFaceSelection(
                 obstacle = selected,
                 onSetObstacleFace = onSetObstacleFace,
@@ -450,7 +455,7 @@ internal fun ArenaCard(
                 onDone = onClearObstacleSelection
             )
         }
-        if (robotSettingsVisible) {
+        if (robotSettingsVisible && !state.arenaLocked) {
             RobotStartCard(
                 robot = state.robot,
                 onSetPose = onSetRobotPose,
@@ -865,6 +870,7 @@ internal fun ArenaCanvas(
                 awaitEachGesture {
                     try {
                         val down = awaitFirstDown()
+                        if (latestState.arenaLocked) return@awaitEachGesture
                         val start = down.position
                         val startPoint = gridPoint(start, size.width.toFloat(), size.height.toFloat())
                         val startState = latestState
@@ -902,6 +908,7 @@ internal fun ArenaCanvas(
                         }
 
                         if (!released) return@awaitEachGesture
+                        if (latestState.arenaLocked) return@awaitEachGesture
                         // A map reset or deletion during the hold must not act on a removed obstacle.
                         if (obstacleId != null && latestState.obstacles.none { it.id == obstacleId }) return@awaitEachGesture
                         val releasedAt = gridPoint(current, size.width.toFloat(), size.height.toFloat())

@@ -86,6 +86,27 @@ class ArenaGestureRegressionTest {
     }
 
     @Test
+    fun taskStartingDuringHoldDoesNotCommitRelease() {
+        var state by mutableStateOf(initial)
+        val moves = mutableListOf<String>()
+        compose.setContent { TestArena(state, onMove = { id, _, _ -> moves += id }) }
+        holdObstacle()
+        compose.runOnIdle { state = state.copy(taskRun = TaskRun(RobotCommand.BEGIN_EXPLORE, TaskPhase.STARTING)) }
+        arena.performTouchInput { up() }
+        compose.runOnIdle { assertTrue(moves.isEmpty()) }
+    }
+
+    @Test
+    fun lockedArenaIgnoresObstacleDrags() {
+        val moves = mutableListOf<String>()
+        val locked = initial.copy(taskRun = TaskRun(RobotCommand.BEGIN_EXPLORE, TaskPhase.RUNNING))
+        compose.setContent { TestArena(locked, onMove = { id, _, _ -> moves += id }) }
+        holdObstacle()
+        arena.performTouchInput { up() }
+        compose.runOnIdle { assertTrue(moves.isEmpty()) }
+    }
+
+    @Test
     fun cancelledDragRestoresOriginalWithoutCommittingMove() {
         val moves = mutableListOf<String>()
         compose.setContent { TestArena(initial, onMove = { id, _, _ -> moves += id }) }

@@ -74,10 +74,12 @@ sealed interface ProtocolMessage {
     data class Text(val text: String) : ProtocolMessage
     data class Target(val obstacleId: String, val targetId: String, val face: Face? = null) : ProtocolMessage
     data class Robot(val x: Int, val y: Int, val direction: Face?) : ProtocolMessage
+    data object TaskComplete : ProtocolMessage
 
 }
 
 fun parseProtocolMessage(line: String): ProtocolMessage? {
+    if (line.trim() == RobotProtocol.TASK_COMPLETE) return ProtocolMessage.TaskComplete
     val parts = line.split(",").map { it.trim().removePrefix("[").removeSuffix("]") }
     return when (parts.firstOrNull()?.uppercase()) {
         RobotProtocol.MESSAGE -> parts.drop(1).joinToString(",").takeIf { it.isNotBlank() }?.let(ProtocolMessage::Text)

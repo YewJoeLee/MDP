@@ -46,6 +46,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.mdpandroid.BluetoothController
+import com.example.mdpandroid.arenaLocked
+import com.example.mdpandroid.canDrive
 import com.example.mdpandroid.BluetoothDeviceInfo
 import com.example.mdpandroid.RobotCommand
 import com.example.mdpandroid.RobotMessages
@@ -131,7 +133,7 @@ fun ARCMApp(
             AppTab.ARENA -> ArenaScreen(
                 padding = padding,
                 state = state,
-                controlsEnabled = demoMode || state.connected,
+                controlsEnabled = state.canDrive,
                 onCommand = onCommand,
                 onAddObstacle = controller::addObstacle,
                 onMoveObstacle = controller::moveObstacle,
@@ -146,12 +148,13 @@ fun ARCMApp(
                 onClearObstacleSelection = controller::clearObstacleSelection
             )
             AppTab.CONTROLS -> ScreenColumn(padding) {
-                ControlAvailabilityCard(enabled = demoMode || state.connected, demoMode = demoMode)
-                ControlCard(enabled = demoMode || state.connected, onCommand = onCommand)
+                ControlAvailabilityCard(enabled = state.canDrive, demoMode = demoMode, taskActive = state.arenaLocked)
+                ControlCard(enabled = state.canDrive, onCommand = onCommand)
                 AssessmentCommandCard(
-                    enabled = demoMode || state.connected,
+                    state = state,
                     onCommand = onCommand,
-                    onSendArena = onSendArena
+                    onSendArena = onSendArena,
+                    onFinishDemoTask = controller::finishDemoTask
                 )
                 RobotActivityCard(
                     statusMessages = state.statusMessages,

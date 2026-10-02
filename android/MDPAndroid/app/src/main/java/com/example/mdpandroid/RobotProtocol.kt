@@ -19,6 +19,7 @@ object RobotProtocol {
     const val ROBOT = "ROBOT"
     const val MESSAGE = "MSG"
     const val TARGET = "TARGET"
+    const val TASK_COMPLETE = "taskComplete"
 
     fun command(command: RobotCommand): String = command.wireValue
 

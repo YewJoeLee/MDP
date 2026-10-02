@@ -19,7 +19,6 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -37,10 +36,15 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.mdpandroid.RobotCommand
+import com.example.mdpandroid.AppState
+import com.example.mdpandroid.arenaLocked
+import com.example.mdpandroid.canSendArena
+import com.example.mdpandroid.description
+import com.example.mdpandroid.taskStartIssue
 import com.example.mdpandroid.ui.theme.MissionTeal
 
 @Composable
-internal fun ControlAvailabilityCard(enabled: Boolean, demoMode: Boolean) {
+internal fun ControlAvailabilityCard(enabled: Boolean, demoMode: Boolean, taskActive: Boolean = false) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(20.dp),
@@ -55,14 +59,15 @@ internal fun ControlAvailabilityCard(enabled: Boolean, demoMode: Boolean) {
             Column(Modifier.weight(1f)) {
                 Text(if (enabled) "Controls are armed" else "Controls are unavailable", fontWeight = FontWeight.Bold)
                 Text(
-                    if (demoMode) "Commands will be recorded locally in demo mode."
+                    if (taskActive) "Manual driving is unavailable while a task is active."
+                    else if (demoMode) "Commands will be recorded locally in demo mode."
                     else if (enabled) "Commands are sent to the active Bluetooth connection."
                     else "Connect a robot on Overview, or enable demo mode to practise.",
                     style = MaterialTheme.typography.bodySmall
                 )
             }
             Text(
-                if (enabled) "READY" else "OFFLINE",
+                if (taskActive) "TASK ACTIVE" else if (enabled) "READY" else "OFFLINE",
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Bold,
                 color = if (enabled) MissionTeal else MaterialTheme.colorScheme.error
@@ -153,15 +158,6 @@ internal fun DrivePad(enabled: Boolean, onCommand: (RobotCommand) -> Unit, butto
                 onClick = { onCommand(RobotCommand.TURN_RIGHT) }
             )
         }
-        OutlinedButton(
-            onClick = { onCommand(RobotCommand.STOP) },
-            enabled = enabled,
-            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp)
-        ) {
-            Icon(Icons.Default.Stop, contentDescription = "Stop robot", modifier = Modifier.size(16.dp))
-            Spacer(Modifier.width(4.dp))
-            Text("Stop")
-        }
     }
 }
 
@@ -186,10 +182,12 @@ internal fun DriveCommandButton(
 
 @Composable
 internal fun AssessmentCommandCard(
-    enabled: Boolean,
+    state: AppState,
     onCommand: (RobotCommand) -> Unit,
-    onSendArena: () -> Unit
+    onSendArena: () -> Unit,
+    onFinishDemoTask: () -> Unit
 ) {
+    val issue = state.taskStartIssue()
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(20.dp),
@@ -198,19 +196,24 @@ internal fun AssessmentCommandCard(
         Column(Modifier.padding(CardInset), verticalArrangement = Arrangement.spacedBy(SectionGap)) {
             Text("Assessment runs", fontWeight = FontWeight.Bold)
             Text(
-                "Start a run only after the team agrees the robot-side protocol and the arena is ready.",
+                state.taskRun?.description() ?: issue ?: "Arena ready. You can start a task.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                Button(onClick = { onCommand(RobotCommand.BEGIN_EXPLORE) }, enabled = enabled, modifier = Modifier.weight(1f)) {
+                Button(onClick = { onCommand(RobotCommand.BEGIN_EXPLORE) }, enabled = issue == null, modifier = Modifier.weight(1f)) {
                     Text("Task 1\nExplore")
                 }
-                Button(onClick = { onCommand(RobotCommand.BEGIN_FASTEST) }, enabled = enabled, modifier = Modifier.weight(1f)) {
+                Button(onClick = { onCommand(RobotCommand.BEGIN_FASTEST) }, enabled = issue == null, modifier = Modifier.weight(1f)) {
                     Text("Task 2\nFastest path")
                 }
             }
-            SendArenaButton(enabled = enabled, onSendArena = onSendArena, modifier = Modifier.fillMaxWidth())
+            if (state.taskRun?.simulated == true) {
+                OutlinedButton(onClick = onFinishDemoTask, modifier = Modifier.fillMaxWidth()) {
+                    Text("Finish demo task")
+                }
+            }
+            SendArenaButton(enabled = state.canSendArena, onSendArena = onSendArena, modifier = Modifier.fillMaxWidth())
         }
     }
 }

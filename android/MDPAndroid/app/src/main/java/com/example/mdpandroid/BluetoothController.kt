@@ -36,6 +36,10 @@ data class AppState(
     val obstacles: List<Obstacle> = emptyList(),
     val selectedObstacleId: String? = null,
     val robot: RobotState = RobotState(),
+    val taskRun: TaskRun? = null,
+    val sentArena: String? = null,
+    val arenaSendPending: Boolean = false,
+    val driveCommandPending: Boolean = false,
     val statusMessages: List<StatusMessage> = emptyList(),
     /** Raw Bluetooth input, rendered with the curated status feed in the single activity log. */
     val receivedRawLog: List<StatusMessage> = emptyList()
@@ -75,7 +79,7 @@ class BluetoothController(private val context: Context) {
     private var reconnectAttempt = 0
     private val incomingFramer = IncomingMessageFramer { addStatus("Incoming message too long; discarded until the next newline") }
     private var nextLogOrder = 0L
-    private var manualMovePending = false
+    private var arenaSendSequence = 0L
 
     var state by mutableStateOf(AppState())
         private set
@@ -167,9 +171,13 @@ class BluetoothController(private val context: Context) {
     }
 
     fun setDemoMode(enabled: Boolean) {
+        if (state.arenaLocked) {
+            addStatus("Wait for the task to finish before changing Demo mode")
+            return
+        }
         if (enabled && state.connected) return
         if (enabled) disconnect() // Cancel retries before practising locally.
-        state = state.copy(demoMode = enabled)
+        state = state.copy(demoMode = enabled, sentArena = null)
     }
 
     @SuppressLint("MissingPermission")
@@ -202,7 +210,8 @@ class BluetoothController(private val context: Context) {
             connectionStatus = "Connecting",
             connectionDetail = RobotMessages.connectingTo(deviceInfo.name ?: deviceInfo.address),
             connected = false,
-            connectedAddress = null
+            connectedAddress = null,
+            sentArena = null
         )
         try { adapter?.cancelDiscovery() } catch (_: SecurityException) { }
 
@@ -331,12 +340,21 @@ class BluetoothController(private val context: Context) {
             connected = false,
             connectedAddress = null,
             connectionStatus = "Disconnected",
-            connectionDetail = RobotMessages.DISCONNECTED_BY_USER
+            connectionDetail = RobotMessages.DISCONNECTED_BY_USER,
+            sentArena = null
         )
         addStatus(RobotMessages.BLUETOOTH_DISCONNECTED)
     }
 
     fun moveRobot(command: RobotCommand) {
+        if (command == RobotCommand.BEGIN_EXPLORE || command == RobotCommand.BEGIN_FASTEST) {
+            startTask(command)
+            return
+        }
+        if (state.arenaLocked) {
+            addStatus("Manual driving is unavailable while a task is active")
+            return
+        }
         val original = state.robot
         val candidate = nextRobotPose(command, original)
         if (candidate != null) {
@@ -350,12 +368,12 @@ class BluetoothController(private val context: Context) {
                 addStatus(RobotMessages.demoCommand(command))
                 return
             }
-            if (manualMovePending) {
-                addStatus("Previous drive command is still being sent; wait or press Stop")
+            if (state.driveCommandPending) {
+                addStatus("Previous drive command is still being sent; please wait")
                 return
             }
-            manualMovePending = true
-            sendCommands(listOf(RobotProtocol.command(command)), onFinished = { manualMovePending = false }) {
+            state = state.copy(driveCommandPending = true)
+            sendCommands(listOf(RobotProtocol.command(command)), onFinished = { state = state.copy(driveCommandPending = false) }) {
                 // A remote pose received during the write takes precedence over the prediction.
                 if (state.robot == original) state = state.copy(robot = updated)
             }
@@ -367,10 +385,49 @@ class BluetoothController(private val context: Context) {
 
     private fun send(command: String) = sendCommands(listOf(command))
 
-    private fun sendCommands(commands: List<String>, onFinished: (() -> Unit)? = null, onSent: (() -> Unit)? = null) {
+    private fun startTask(command: RobotCommand) {
+        state.taskStartIssue()?.let {
+            addStatus(it)
+            return
+        }
+        val run = TaskRun(command, TaskPhase.STARTING, simulated = state.demoMode)
+        state = state.copy(taskRun = run)
+        if (run.simulated) {
+            state = state.copy(taskRun = run.copy(phase = TaskPhase.RUNNING))
+            addStatus(RobotMessages.demoCommand(command))
+            return
+        }
+        sendCommands(listOf(RobotProtocol.command(command)),
+            onNotSent = {
+                if (state.taskRun === run) state = state.copy(taskRun = null)
+            },
+            onFinished = {
+                if (state.taskRun === run) state = state.copy(taskRun = run.copy(phase = TaskPhase.DELIVERY_UNKNOWN))
+            },
+            onSent = {
+                if (state.taskRun === run) state = state.copy(taskRun = run.copy(phase = TaskPhase.RUNNING))
+            }
+        )
+    }
+
+    fun finishDemoTask() {
+        if (state.taskRun?.simulated != true) return
+        state = state.copy(taskRun = null, sentArena = null)
+        addStatus("Demo task finished. The map is unlocked.")
+    }
+
+    private fun finishTaskFromRobot() {
+        // Ignore duplicate/unsolicited completions while preparing the next arena.
+        if (state.taskRun == null) return
+        state = state.copy(taskRun = null, sentArena = null)
+        addStatus("Task complete. The map is unlocked. Send the arena before the next run.")
+    }
+
+    private fun sendCommands(commands: List<String>, onFinished: (() -> Unit)? = null, onNotSent: (() -> Unit)? = null, onSent: (() -> Unit)? = null) {
         if (commands.isEmpty()) return
         if (state.demoMode) {
             addStatus("Demo only: ${commands.joinToString("; ")}")
+            onNotSent?.invoke()
             onFinished?.invoke()
             return
         }
@@ -380,6 +437,7 @@ class BluetoothController(private val context: Context) {
         val sessionId = connection.third
         if (!state.connected || currentSocket == null || currentOutput == null) {
             addStatus(RobotMessages.commandNotSent(commands.joinToString("; ")))
+            onNotSent?.invoke()
             onFinished?.invoke()
             return
         }
@@ -418,18 +476,21 @@ class BluetoothController(private val context: Context) {
             },
             onCancelled = {
                 mainHandler.post {
+                    onNotSent?.invoke()
                     onFinished?.invoke()
                     if (isCurrentSession(sessionId, currentSocket)) addStatus("Pending command cancelled: ${commands.joinToString("; ")}")
                 }
             }
         ), urgent = commands.singleOrNull() == RobotProtocol.command(RobotCommand.STOP))
         if (!accepted) {
+            onNotSent?.invoke()
             onFinished?.invoke()
             addStatus("Send queue full; command not sent: ${commands.joinToString("; ")}")
         }
     }
 
     fun addObstacle(point: GridPoint) {
+        if (!allowArenaEdit()) return
         if (point.x !in 0 until MAP_COLUMNS || point.y !in 0 until MAP_ROWS) return
         if (state.robot.occupies(point.x, point.y)) {
             addStatus(RobotMessages.obstacleCannotBePlacedOnRobot())
@@ -442,22 +503,26 @@ class BluetoothController(private val context: Context) {
     }
 
     fun moveObstacle(id: String, x: Int, y: Int) {
+        if (!allowArenaEdit()) return
         val change = planObstacleMove(state, id, GridPoint(x, y))
         state = change.state
         change.message?.let(::addStatus)
     }
 
     fun removeObstacle(id: String) {
+        if (!allowArenaEdit()) return
         if (state.obstacles.none { it.id == id }) return
         state = state.copy(obstacles = state.obstacles.filterNot { it.id == id }, selectedObstacleId = null)
     }
 
     fun setObstacleFace(id: String, face: Face) {
+        if (!allowArenaEdit()) return
         if (state.obstacles.none { it.id == id }) return
         state = state.copy(obstacles = state.obstacles.map { if (it.id == id) it.copy(targetFace = face) else it }, selectedObstacleId = id)
     }
 
     fun clearObstacleTarget(id: String) {
+        if (!allowArenaEdit()) return
         val change = planClearObstacleFace(state, id)
         state = change.state
         change.message?.let(::addStatus)
@@ -465,6 +530,7 @@ class BluetoothController(private val context: Context) {
 
     /** Updates the local start position used to display and validate the arena. */
     fun setRobotStart(x: Int, y: Int) {
+        if (!allowArenaEdit()) return
         val robot = localRobotPose(x, y, state.robot.direction, state.obstacles) ?: run {
             reportRobotPoseBlocked(x, y, state.robot.direction)
             return
@@ -475,6 +541,7 @@ class BluetoothController(private val context: Context) {
 
     /** Updates the local facing direction used to display the robot. */
     fun setRobotFace(face: Face) {
+        if (!allowArenaEdit()) return
         val robot = localRobotPose(state.robot.x, state.robot.y, face, state.obstacles) ?: run {
             reportRobotPoseBlocked(state.robot.x, state.robot.y, face)
             return
@@ -485,6 +552,7 @@ class BluetoothController(private val context: Context) {
 
     /** Sets the robot's local starting pose without sending a separate ROBOT message. */
     fun setRobotPose(x: Int, y: Int, direction: Face) {
+        if (!allowArenaEdit()) return
         val robot = localRobotPose(x, y, direction, state.obstacles) ?: run {
             reportRobotPoseBlocked(x, y, direction)
             return
@@ -507,10 +575,36 @@ class BluetoothController(private val context: Context) {
 
     /** Send the complete obstacle list using the original working Pi format. */
     fun sendArenaSnapshot() {
+        if (!state.canSendArena) {
+            addStatus(if (state.arenaLocked) "The arena is locked while a task is active" else "Connect to the robot and wait for any arena send to finish")
+            return
+        }
+        val missingFaces = state.obstacles.filter { it.targetFace == null }.map { it.id }
+        if (missingFaces.isNotEmpty()) {
+            addStatus("Arena not sent: set a face for ${missingFaces.joinToString(", ")}.")
+            return
+        }
         val obstacleCount = state.obstacles.size
-        sendCommands(RobotProtocol.arenaSetup(state.obstacles), onSent = {
+        val payload = RobotProtocol.obstacleList(state.obstacles)
+        if (state.demoMode) {
+            state = state.copy(sentArena = payload)
+            addStatus("Demo only: $payload")
+            return
+        }
+        val sequence = ++arenaSendSequence
+        state = state.copy(arenaSendPending = true, sentArena = null)
+        sendCommands(listOf(payload), onFinished = {
+            if (arenaSendSequence == sequence) state = state.copy(arenaSendPending = false)
+        }, onSent = {
+            if (arenaSendSequence == sequence) state = state.copy(sentArena = payload)
             addStatus(RobotMessages.arenaSetupSent(obstacleCount))
         })
+    }
+
+    private fun allowArenaEdit(): Boolean {
+        if (!state.arenaLocked) return true
+        addStatus("The map is locked until the task finishes")
+        return false
     }
 
     fun addStatus(message: String) {
@@ -613,11 +707,13 @@ class BluetoothController(private val context: Context) {
         val parts = line.split(",").map { it.trim().removePrefix("[").removeSuffix("]") }
         when (parts.firstOrNull()?.uppercase()) {
             RobotProtocol.ADD -> {
+                if (!allowArenaEdit()) return
                 val id = parts.getOrNull(1)?.let(::canonicalObstacleId) ?: return
                 val point = parseCoordinateFrom(line) ?: return
                 upsertRemoteObstacle(id, point)
             }
             RobotProtocol.SUBTRACT -> {
+                if (!allowArenaEdit()) return
                 val id = parts.getOrNull(1)?.let(::canonicalObstacleId) ?: return
                 if (state.obstacles.any { it.id.equals(id, ignoreCase = true) }) {
                     state = state.copy(obstacles = state.obstacles.filterNot { it.id.equals(id, ignoreCase = true) })
@@ -625,6 +721,7 @@ class BluetoothController(private val context: Context) {
                 }
             }
             RobotProtocol.FACE -> {
+                if (!allowArenaEdit()) return
                 val id = parts.getOrNull(1)?.let(::canonicalObstacleId) ?: return
                 val face = parts.getOrNull(2)?.uppercase()?.let { code -> Face.entries.firstOrNull { it.code == code } } ?: return
                 if (state.obstacles.any { it.id.equals(id, ignoreCase = true) }) {
@@ -635,9 +732,11 @@ class BluetoothController(private val context: Context) {
                 }
             }
             else -> when (val message = parseProtocolMessage(line)) {
+                ProtocolMessage.TaskComplete -> finishTaskFromRobot()
                 is ProtocolMessage.Text -> addStatus(message.text)
                 is ProtocolMessage.Target -> {
-                    val update = applyTargetRecognition(state.obstacles, message)
+                    val recognition = if (state.arenaLocked) message.copy(face = null) else message
+                    val update = applyTargetRecognition(state.obstacles, recognition)
                     if (update.matched) {
                         state = state.copy(obstacles = update.obstacles)
                     } else {
@@ -694,7 +793,8 @@ class BluetoothController(private val context: Context) {
                 connected = false,
                 connectedAddress = null,
                 connectionStatus = "Disconnected",
-                connectionDetail = detail
+                connectionDetail = detail,
+                sentArena = null
             )
             addStatus(detail)
             if (retry) {
@@ -716,7 +816,7 @@ class BluetoothController(private val context: Context) {
         }
         if (!relevant || closed) return
         resetIncomingBuffer()
-        state = state.copy(connected = false, connectedAddress = null, connectionStatus = "Disconnected", connectionDetail = detail)
+        state = state.copy(connected = false, connectedAddress = null, connectionStatus = "Disconnected", connectionDetail = detail, sentArena = null)
         addStatus(detail)
         scheduleReconnect()
     }

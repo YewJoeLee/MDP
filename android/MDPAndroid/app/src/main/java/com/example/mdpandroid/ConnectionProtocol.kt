@@ -12,5 +12,6 @@ internal fun AppState.connectedTo(device: BluetoothDeviceInfo): AppState = copy(
     connected = true,
     connectedAddress = device.address,
     connectionStatus = "Connected",
-    connectionDetail = RobotMessages.connectedTo(device.name ?: device.address)
+    connectionDetail = RobotMessages.connectedTo(device.name ?: device.address),
+    sentArena = null
 )

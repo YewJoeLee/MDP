@@ -6,16 +6,19 @@ import java.io.Serializable
 data class ArenaSnapshot(
     val obstacles: List<Obstacle>,
     val selectedObstacleId: String?,
-    val robot: RobotState
+    val robot: RobotState,
+    val taskRun: TaskRun? = null
 ) : Serializable
 
 fun AppState.arenaSnapshot(): ArenaSnapshot =
-    ArenaSnapshot(obstacles, selectedObstacleId, robot)
+    ArenaSnapshot(obstacles, selectedObstacleId, robot, taskRun)
 
 fun AppState.withArenaSnapshot(snapshot: ArenaSnapshot): AppState = copy(
     obstacles = snapshot.obstacles,
     selectedObstacleId = snapshot.selectedObstacleId?.takeIf { id ->
         snapshot.obstacles.any { it.id == id }
     },
-    robot = snapshot.robot
+    robot = snapshot.robot,
+    taskRun = snapshot.taskRun?.copy(phase = TaskPhase.DELIVERY_UNKNOWN),
+    sentArena = null
 )
