@@ -11,7 +11,7 @@
 - [ ] If the team changes this contract later, update Android and the Pi together. There is no connection-format selector or saved format override.
 - [ ] Verify **Send Arena** in both tabs receives only the existing obstacle tuple list, with no ROBOT prefix and no added newline. Both tabs share the same button implementation and send callback. Verify the Pi treats the layout as replacement state, including deleted obstacles and an empty arena list. Android rejects arena sends if any obstacle has no face.
 - [ ] Verify task start tokens `beginExplore` / `beginFastest` and movement tokens `f` / `r` / `tl` / `tr` with the actual robot receiver.
-- [ ] Configure and verify the Pi sends the agreed bare completion record `taskComplete\n` when either task has finished. Android ends the active task when this complete record arrives; `MSG,taskComplete` is a status message and does not end the task. Do not infer completion from a target result or a Bluetooth disconnect.
+- [ ] Verify the observed Pi completion record `MSG,Run complete. Done !\n` arrives when either task has finished. Android ends the active task when this complete record arrives. The earlier bare `taskComplete\n` record remains supported; `MSG,taskComplete` is a status message and does not end the task. Do not infer completion from a target result or a Bluetooth disconnect.
 - [ ] Run reconnect without restarting the Pi, rotation with a live connection, map editing while a task is running, and a complete assessment run with the final APK.
 - [ ] Run the arena gesture instrumentation tests on the tablet. They are compiled here but require a connected device to execute.
 
@@ -25,7 +25,7 @@ Arena also has Task 1 Explore directly below Send arena. Arena and Controls use 
 
 Obstacle and robot settings remain editable during a task, as requested on 2 October 2026. Manual driving, arena sends and repeated task starts remain unavailable while a task is active. TARGET and ROBOT telemetry continue to update the display. Active task tracking survives rotation and Activity saved-state restoration. Demo runs have a local Finish demo task action.
 
-Receiving `taskComplete` followed by a newline or carriage return ends the active task, including a task restored with uncertain delivery. Obstacle layout, recognized targets, and the latest robot pose remain visible. The arena must be sent again before the next task. Duplicate completion records received while no task is active do not invalidate the next arena's readiness.
+Receiving the exact status record `MSG,Run complete. Done !` or the earlier bare `taskComplete`, followed by a newline or carriage return, ends the active task, including a task restored with uncertain delivery. Split Bluetooth reads are collected until that delimiter arrives. Other status messages, including partial or extended completion phrases, do not end a task. Obstacle layout, recognized targets, and the latest robot pose remain visible. The arena must be sent again before the next task. Duplicate completion records received while no task is active do not invalidate the next arena's readiness.
 
 Each write batch has a two-second deadline. A stalled write causes socket closure and an explicit delivery-unknown warning. Successful transmission means the bytes were written, not that the robot acknowledged or executed them. No commands are replayed automatically after reconnect.
 

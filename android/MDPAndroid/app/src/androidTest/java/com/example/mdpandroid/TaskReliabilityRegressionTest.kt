@@ -131,9 +131,30 @@ class TaskReliabilityRegressionTest {
         assertEquals(2, controller.state.obstacles.size)
     }
 
+    @Test fun splitPiCompletionEndsEitherTaskAndRequiresAFreshArenaSend() = withController { controller ->
+        controller.addObstacle(GridPoint(5, 5))
+        controller.setObstacleFace("B1", Face.N)
+        for (command in listOf(RobotCommand.BEGIN_EXPLORE, RobotCommand.BEGIN_FASTEST)) {
+            controller.sendArenaSnapshot()
+            controller.moveRobot(command)
+            assertTrue(controller.state.taskActive)
+            receiveChunk(controller, "MSG,Run com")
+            receiveChunk(controller, "plete. Done !")
+            assertTrue(controller.state.taskActive)
+            receiveChunk(controller, "\n")
+            assertFalse(controller.state.taskActive)
+            assertEquals(null, controller.state.sentArena)
+            assertTrue(controller.state.taskStartIssue() != null)
+            assertEquals(listOf(Obstacle("B1", 5, 5, targetFace = Face.N)), controller.state.obstacles)
+            assertEquals("MSG,Run complete. Done !", controller.state.receivedRawLog.last().text)
+        }
+    }
+
     @Test fun otherMessagesCannotUnlockARunningTask() = withController { controller ->
         prepareAndStart(controller)
         receive(controller, "MSG,taskComplete")
+        receive(controller, "MSG,Run complete")
+        receive(controller, "MSG,Run complete. Done ! Waiting")
         receive(controller, "taskComplete,1")
         receive(controller, "taskCompleteLater")
         receive(controller, "TARGET,1,bb")
@@ -142,10 +163,10 @@ class TaskReliabilityRegressionTest {
 
     @Test fun repeatedCompletionDoesNotInvalidateArenaSentForTheNextRun() = withController { controller ->
         prepareAndStart(controller)
-        receive(controller, "taskComplete")
+        receive(controller, "MSG,Run complete. Done !")
         assertFalse(controller.state.taskActive)
         controller.sendArenaSnapshot()
-        receive(controller, "taskComplete")
+        receive(controller, "MSG,Run complete. Done !")
         assertEquals("[(1, 5, 5, \"N\")]", controller.state.sentArena)
         assertEquals(null, controller.state.taskStartIssue())
         controller.moveRobot(RobotCommand.BEGIN_FASTEST)

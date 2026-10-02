@@ -20,6 +20,7 @@ object RobotProtocol {
     const val MESSAGE = "MSG"
     const val TARGET = "TARGET"
     const val TASK_COMPLETE = "taskComplete"
+    const val TASK_COMPLETE_MESSAGE = "Run complete. Done !"
 
     fun command(command: RobotCommand): String = command.wireValue
 

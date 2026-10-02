@@ -82,7 +82,10 @@ fun parseProtocolMessage(line: String): ProtocolMessage? {
     if (line.trim() == RobotProtocol.TASK_COMPLETE) return ProtocolMessage.TaskComplete
     val parts = line.split(",").map { it.trim().removePrefix("[").removeSuffix("]") }
     return when (parts.firstOrNull()?.uppercase()) {
-        RobotProtocol.MESSAGE -> parts.drop(1).joinToString(",").takeIf { it.isNotBlank() }?.let(ProtocolMessage::Text)
+        RobotProtocol.MESSAGE -> parts.drop(1).joinToString(",").takeIf { it.isNotBlank() }?.let { text ->
+            if (text == RobotProtocol.TASK_COMPLETE_MESSAGE) ProtocolMessage.TaskComplete
+            else ProtocolMessage.Text(text)
+        }
         RobotProtocol.TARGET -> {
             val id = parts.getOrNull(1)?.let(::canonicalObstacleId) ?: return null
             val target = parts.getOrNull(2)?.takeIf { it.isNotBlank() } ?: return null
