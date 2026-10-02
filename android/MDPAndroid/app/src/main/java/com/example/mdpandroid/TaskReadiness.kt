@@ -10,17 +10,17 @@ data class TaskRun(
     val simulated: Boolean = false
 ) : Serializable
 
-val AppState.arenaLocked: Boolean get() = taskRun != null
+val AppState.taskActive: Boolean get() = taskRun != null
 
 val AppState.canSendArena: Boolean
-    get() = (connected || demoMode) && !arenaLocked && !arenaSendPending
+    get() = (connected || demoMode) && !taskActive && !arenaSendPending
 
 val AppState.canDrive: Boolean
-    get() = (connected || demoMode) && !arenaLocked
+    get() = (connected || demoMode) && !taskActive
 
-/** Recognition results and live pose updates do not change the obstacle layout sent to the Pi. */
+/** Starting a task requires the current obstacle layout to have been sent successfully. */
 fun AppState.taskStartIssue(): String? = when {
-    arenaLocked -> "A task is already active. Wait for it to finish."
+    taskActive -> "A task is already active. Wait for it to finish."
     !connected && !demoMode -> "Connect to the robot before starting a task."
     driveCommandPending -> "Wait for the drive command to finish sending."
     arenaSendPending -> "Wait for the arena to finish sending."
@@ -34,8 +34,8 @@ fun AppState.taskStartIssue(): String? = when {
 fun TaskRun.description(): String {
     val task = if (command == RobotCommand.BEGIN_EXPLORE) "Task 1" else "Task 2"
     return when (phase) {
-        TaskPhase.STARTING -> "$task is starting. The map is locked."
-        TaskPhase.RUNNING -> "$task is running. The map is locked until the task finishes."
-        TaskPhase.DELIVERY_UNKNOWN -> "$task delivery is unconfirmed. The map remains locked while the robot may be running."
+        TaskPhase.STARTING -> "$task is starting."
+        TaskPhase.RUNNING -> "$task is running."
+        TaskPhase.DELIVERY_UNKNOWN -> "$task delivery is unconfirmed. The robot may be running."
     }
 }

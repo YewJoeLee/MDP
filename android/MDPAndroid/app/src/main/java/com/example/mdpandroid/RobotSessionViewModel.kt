@@ -10,7 +10,7 @@ class RobotSessionViewModel : ViewModel() {
     fun controller(context: Context, savedArena: ArenaSnapshot?): BluetoothController {
         retainedController?.let { return it }
         return BluetoothController(context.applicationContext).also {
-            savedArena?.let(it::restoreArena)
+            savedArena?.let(it::restoreSession)
             retainedController = it
         }
     }

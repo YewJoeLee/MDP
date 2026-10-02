@@ -37,7 +37,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.mdpandroid.RobotCommand
 import com.example.mdpandroid.AppState
-import com.example.mdpandroid.arenaLocked
 import com.example.mdpandroid.canSendArena
 import com.example.mdpandroid.description
 import com.example.mdpandroid.taskStartIssue
@@ -201,12 +200,8 @@ internal fun AssessmentCommandCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                Button(onClick = { onCommand(RobotCommand.BEGIN_EXPLORE) }, enabled = issue == null, modifier = Modifier.weight(1f)) {
-                    Text("Task 1\nExplore")
-                }
-                Button(onClick = { onCommand(RobotCommand.BEGIN_FASTEST) }, enabled = issue == null, modifier = Modifier.weight(1f)) {
-                    Text("Task 2\nFastest path")
-                }
+                TaskStartButton(state, RobotCommand.BEGIN_EXPLORE, onCommand, Modifier.weight(1f))
+                TaskStartButton(state, RobotCommand.BEGIN_FASTEST, onCommand, Modifier.weight(1f))
             }
             if (state.taskRun?.simulated == true) {
                 OutlinedButton(onClick = onFinishDemoTask, modifier = Modifier.fillMaxWidth()) {
@@ -215,6 +210,25 @@ internal fun AssessmentCommandCard(
             }
             SendArenaButton(enabled = state.canSendArena, onSendArena = onSendArena, modifier = Modifier.fillMaxWidth())
         }
+    }
+}
+
+/** Shared task action and readiness checks in Arena and Controls. */
+@Composable
+internal fun TaskStartButton(
+    state: AppState,
+    command: RobotCommand,
+    onCommand: (RobotCommand) -> Unit,
+    modifier: Modifier = Modifier,
+    contentPadding: PaddingValues = ButtonDefaults.ContentPadding
+) {
+    Button(
+        onClick = { onCommand(command) },
+        enabled = state.taskStartIssue() == null,
+        modifier = modifier.heightIn(min = 48.dp),
+        contentPadding = contentPadding
+    ) {
+        Text(if (command == RobotCommand.BEGIN_FASTEST) "Task 2\nFastest path" else "Task 1\nExplore", textAlign = TextAlign.Center)
     }
 }
 

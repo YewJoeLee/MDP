@@ -2,7 +2,7 @@ package com.example.mdpandroid
 
 import java.io.Serializable
 
-/** Arena data that must remain available when Android recreates the Activity. */
+/** Arena data used for Activity restoration and persistent map storage. */
 data class ArenaSnapshot(
     val obstacles: List<Obstacle>,
     val selectedObstacleId: String?,
@@ -22,3 +22,6 @@ fun AppState.withArenaSnapshot(snapshot: ArenaSnapshot): AppState = copy(
     taskRun = snapshot.taskRun?.copy(phase = TaskPhase.DELIVERY_UNKNOWN),
     sentArena = null
 )
+
+/** Selection, task execution and Bluetooth readiness are not retained in the saved map. */
+fun AppState.persistentArenaSnapshot(): ArenaSnapshot = ArenaSnapshot(obstacles, null, robot)

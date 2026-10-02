@@ -43,20 +43,20 @@ class TaskReadinessTest {
         assertNotNull(ready.copy(robot = RobotState(0, 0)).taskStartIssue())
     }
 
-    @Test fun everyActivePhaseLocksEditsDriveSendAndFurtherStarts() {
+    @Test fun everyActivePhaseBlocksDriveSendAndFurtherStarts() {
         TaskPhase.entries.forEach { phase ->
             val running = ready.copy(taskRun = TaskRun(RobotCommand.BEGIN_EXPLORE, phase))
-            assertTrue(running.arenaLocked)
+            assertTrue(running.taskActive)
             assertFalse(running.canDrive)
             assertFalse(running.canSendArena)
             assertNotNull(running.taskStartIssue())
         }
     }
 
-    @Test fun processRestorationKeepsTheMapLockedWithoutRestoringSendReadiness() {
+    @Test fun processRestorationRetainsTaskWithoutRestoringSendReadiness() {
         val running = ready.copy(taskRun = TaskRun(RobotCommand.BEGIN_EXPLORE, TaskPhase.RUNNING))
         val restored = AppState().withArenaSnapshot(running.arenaSnapshot())
-        assertTrue(restored.arenaLocked)
+        assertTrue(restored.taskActive)
         assertNull(restored.sentArena)
         assertNotNull(restored.taskStartIssue())
     }

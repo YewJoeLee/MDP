@@ -28,7 +28,6 @@ import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRowDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -46,7 +45,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.mdpandroid.BluetoothController
-import com.example.mdpandroid.arenaLocked
+import com.example.mdpandroid.taskActive
 import com.example.mdpandroid.canDrive
 import com.example.mdpandroid.BluetoothDeviceInfo
 import com.example.mdpandroid.RobotCommand
@@ -83,10 +82,7 @@ fun ARCMApp(
                         selectedTabIndex = selectedTab,
                         modifier = Modifier.weight(1f),
                         containerColor = MaterialTheme.colorScheme.primaryContainer,
-                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                        indicator = {
-                            TabRowDefaults.PrimaryIndicator(color = MaterialTheme.colorScheme.primary)
-                        }
+                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer
                     ) {
                         AppTab.entries.forEachIndexed { index, tab ->
                             Tab(
@@ -125,14 +121,11 @@ fun ARCMApp(
                     onDisconnect = controller::disconnect,
                     onSelectDevice = { showDevices = true }
                 )
-                RobotActivityCard(
-                    statusMessages = state.statusMessages,
-                    receivedRawMessages = state.receivedRawLog
-                )
             }
             AppTab.ARENA -> ArenaScreen(
                 padding = padding,
                 state = state,
+                logHistory = controller.logHistory,
                 controlsEnabled = state.canDrive,
                 onCommand = onCommand,
                 onAddObstacle = controller::addObstacle,
@@ -144,11 +137,12 @@ fun ARCMApp(
                 onSetRobotFace = controller::setRobotFace,
                 onSetRobotPose = controller::setRobotPose,
                 onSendArena = onSendArena,
+                onResetArena = controller::resetArena,
                 onClearObstacleTarget = controller::clearObstacleTarget,
                 onClearObstacleSelection = controller::clearObstacleSelection
             )
             AppTab.CONTROLS -> ScreenColumn(padding) {
-                ControlAvailabilityCard(enabled = state.canDrive, demoMode = demoMode, taskActive = state.arenaLocked)
+                ControlAvailabilityCard(enabled = state.canDrive, demoMode = demoMode, taskActive = state.taskActive)
                 ControlCard(enabled = state.canDrive, onCommand = onCommand)
                 AssessmentCommandCard(
                     state = state,
@@ -157,8 +151,7 @@ fun ARCMApp(
                     onFinishDemoTask = controller::finishDemoTask
                 )
                 RobotActivityCard(
-                    statusMessages = state.statusMessages,
-                    receivedRawMessages = state.receivedRawLog
+                    history = controller.logHistory
                 )
             }
         }

@@ -29,6 +29,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -68,7 +70,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.mdpandroid.AppState
-import com.example.mdpandroid.arenaLocked
+import com.example.mdpandroid.ActivityLogHistory
 import com.example.mdpandroid.canSendArena
 import com.example.mdpandroid.description
 import com.example.mdpandroid.ArenaGestureAction
@@ -95,6 +97,7 @@ import com.example.mdpandroid.ui.theme.TargetAmber
 internal fun ArenaScreen(
     padding: PaddingValues,
     state: AppState,
+    logHistory: ActivityLogHistory,
     controlsEnabled: Boolean,
     onCommand: (RobotCommand) -> Unit,
     onAddObstacle: (GridPoint) -> Unit,
@@ -106,10 +109,15 @@ internal fun ArenaScreen(
     onSetRobotFace: (Face) -> Unit,
     onSetRobotPose: (Int, Int, Face) -> Unit,
     onSendArena: () -> Unit,
+    onResetArena: () -> Unit,
     onClearObstacleTarget: (String) -> Unit,
     onClearObstacleSelection: () -> Unit
 ) {
     var robotSettingsVisible by rememberSaveable { mutableStateOf(false) }
+    val resetArena = {
+        robotSettingsVisible = false
+        onResetArena()
+    }
     val selectRobot = {
         onClearObstacleSelection()
         robotSettingsVisible = true
@@ -129,6 +137,8 @@ internal fun ArenaScreen(
         if (maxWidth > maxHeight) {
             ArenaScreenLandscape(
                 state = state,
+                onCommand = onCommand,
+                logHistory = logHistory,
                 onAddObstacle = onAddObstacle,
                 onMoveObstacle = onMoveObstacle,
                 onRemoveObstacle = onRemoveObstacle,
@@ -141,12 +151,14 @@ internal fun ArenaScreen(
                 onSelectRobot = selectRobot,
                 onCloseRobotSettings = { robotSettingsVisible = false },
                 onSendArena = onSendArena,
+                onResetArena = resetArena,
                 onClearObstacleTarget = onClearObstacleTarget,
                 onClearObstacleSelection = onClearObstacleSelection
             )
         } else {
             ArenaScreenPortrait(
                 state = state,
+                logHistory = logHistory,
                 controlsEnabled = controlsEnabled,
                 onCommand = onCommand,
                 onAddObstacle = onAddObstacle,
@@ -161,6 +173,7 @@ internal fun ArenaScreen(
                 onSelectRobot = selectRobot,
                 onCloseRobotSettings = { robotSettingsVisible = false },
                 onSendArena = onSendArena,
+                onResetArena = resetArena,
                 onClearObstacleTarget = onClearObstacleTarget,
                 onClearObstacleSelection = onClearObstacleSelection
             )
@@ -171,6 +184,7 @@ internal fun ArenaScreen(
 @Composable
 private fun ArenaScreenPortrait(
     state: AppState,
+    logHistory: ActivityLogHistory,
     controlsEnabled: Boolean,
     onCommand: (RobotCommand) -> Unit,
     onAddObstacle: (GridPoint) -> Unit,
@@ -185,6 +199,7 @@ private fun ArenaScreenPortrait(
     onSelectRobot: () -> Unit,
     onCloseRobotSettings: () -> Unit,
     onSendArena: () -> Unit,
+    onResetArena: () -> Unit,
     onClearObstacleTarget: (String) -> Unit,
     onClearObstacleSelection: () -> Unit
 ) {
@@ -202,6 +217,7 @@ private fun ArenaScreenPortrait(
     ) {
         ArenaCard(
             state = state,
+            onCommand = onCommand,
             onAddObstacle = onAddObstacle,
             onMoveObstacle = onMoveObstacle,
             onRemoveObstacle = onRemoveObstacle,
@@ -214,6 +230,7 @@ private fun ArenaScreenPortrait(
             onSelectRobot = onSelectRobot,
             onCloseRobotSettings = onCloseRobotSettings,
             onSendArena = onSendArena,
+            onResetArena = onResetArena,
             onClearObstacleTarget = onClearObstacleTarget,
             onClearObstacleSelection = onClearObstacleSelection
         )
@@ -225,8 +242,7 @@ private fun ArenaScreenPortrait(
         ) {
             ManualControlSection(enabled = controlsEnabled, onCommand = onCommand)
             RobotActivityCard(
-                statusMessages = state.statusMessages,
-                receivedRawMessages = state.receivedRawLog,
+                history = logHistory,
                 modifier = Modifier.fillMaxWidth(),
                 boxed = false
             )
@@ -237,6 +253,8 @@ private fun ArenaScreenPortrait(
 @Composable
 private fun ArenaScreenLandscape(
     state: AppState,
+    onCommand: (RobotCommand) -> Unit,
+    logHistory: ActivityLogHistory,
     onAddObstacle: (GridPoint) -> Unit,
     onMoveObstacle: (String, Int, Int) -> Unit,
     onRemoveObstacle: (String) -> Unit,
@@ -249,6 +267,7 @@ private fun ArenaScreenLandscape(
     onSelectRobot: () -> Unit,
     onCloseRobotSettings: () -> Unit,
     onSendArena: () -> Unit,
+    onResetArena: () -> Unit,
     onClearObstacleTarget: (String) -> Unit,
     onClearObstacleSelection: () -> Unit
 ) {
@@ -261,6 +280,7 @@ private fun ArenaScreenLandscape(
     ) {
         ArenaWorkspaceCard(
             state = state,
+            onCommand = onCommand,
             onAddObstacle = onAddObstacle,
             onMoveObstacle = onMoveObstacle,
             onSelectObstacle = onSelectObstacle,
@@ -269,6 +289,7 @@ private fun ArenaScreenLandscape(
             onSetRobotFace = onSetRobotFace,
             onSelectRobot = onSelectRobot,
             onSendArena = onSendArena,
+            onResetArena = onResetArena,
             modifier = Modifier
                 .weight(2.4f)
                 .fillMaxHeight()
@@ -283,7 +304,7 @@ private fun ArenaScreenLandscape(
             verticalArrangement = Arrangement.spacedBy(SectionGap)
         ) {
             state.taskRun?.let { Text(it.description(), style = MaterialTheme.typography.bodySmall) }
-            if (selected != null && !state.arenaLocked) {
+            if (selected != null) {
                 TargetFaceSelection(
                     obstacle = selected,
                     onSetObstacleFace = onSetObstacleFace,
@@ -292,7 +313,7 @@ private fun ArenaScreenLandscape(
                     onDone = onClearObstacleSelection
                 )
             }
-            if (robotSettingsVisible && !state.arenaLocked) {
+            if (robotSettingsVisible) {
                 RobotStartCard(
                     robot = state.robot,
                     onSetPose = onSetRobotPose,
@@ -300,8 +321,7 @@ private fun ArenaScreenLandscape(
                 )
             }
             RobotActivityCard(
-                statusMessages = state.statusMessages,
-                receivedRawMessages = state.receivedRawLog,
+                history = logHistory,
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f),
@@ -318,6 +338,7 @@ private fun ArenaScreenLandscape(
 @Composable
 private fun ArenaWorkspaceCard(
     state: AppState,
+    onCommand: (RobotCommand) -> Unit,
     onAddObstacle: (GridPoint) -> Unit,
     onMoveObstacle: (String, Int, Int) -> Unit,
     onSelectObstacle: (String) -> Unit,
@@ -326,6 +347,7 @@ private fun ArenaWorkspaceCard(
     onSetRobotFace: (Face) -> Unit,
     onSelectRobot: () -> Unit,
     onSendArena: () -> Unit,
+    onResetArena: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     // No card/background — sits directly on the page so the grid can claim the maximum space.
@@ -333,7 +355,7 @@ private fun ArenaWorkspaceCard(
         modifier = modifier.fillMaxSize(),
         horizontalArrangement = Arrangement.spacedBy(SpaceSm)
     ) {
-        ArenaStatusSidebar(state = state, onSendArena = onSendArena, modifier = Modifier.fillMaxHeight())
+        ArenaStatusSidebar(state = state, onCommand = onCommand, onSendArena = onSendArena, onResetArena = onResetArena, modifier = Modifier.fillMaxHeight())
         // The grid owns the entire available height; ArenaGrid reserves its axis-label gutter.
         ArenaGrid(
             state = state,
@@ -353,7 +375,13 @@ private fun ArenaWorkspaceCard(
  * sidebar to the left of the map instead of a horizontal strip above it, so the grid can use the
  * full height. */
 @Composable
-private fun ArenaStatusSidebar(state: AppState, onSendArena: () -> Unit, modifier: Modifier = Modifier) {
+private fun ArenaStatusSidebar(
+    state: AppState,
+    onCommand: (RobotCommand) -> Unit,
+    onSendArena: () -> Unit,
+    onResetArena: () -> Unit,
+    modifier: Modifier = Modifier
+) {
     val identifiedTargets = state.obstacles.count { it.targetId != null }
     Surface(
         modifier = modifier.width(96.dp),
@@ -390,6 +418,11 @@ private fun ArenaStatusSidebar(state: AppState, onSendArena: () -> Unit, modifie
                 label = "Send\narena",
                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
             )
+            TaskStartButton(
+                state, RobotCommand.BEGIN_EXPLORE, onCommand, Modifier.fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
+            )
+            ResetArenaButton(onResetArena, Modifier.fillMaxWidth(), narrow = true)
         }
     }
 }
@@ -403,8 +436,32 @@ internal fun ArenaLegendItem(color: Color, label: String) {
 }
 
 @Composable
+internal fun ResetArenaButton(onResetArena: () -> Unit, modifier: Modifier = Modifier, narrow: Boolean = false) {
+    var confirming by rememberSaveable { mutableStateOf(false) }
+    OutlinedButton(
+        onClick = { confirming = true },
+        modifier = modifier,
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
+    ) {
+        Text(if (narrow) "Reset\nmap" else "Reset map")
+    }
+    if (confirming) {
+        AlertDialog(
+            onDismissRequest = { confirming = false },
+            title = { Text("Reset map?") },
+            text = { Text("Clear all obstacles and targets, and return the robot to (1, 1), facing North. This only resets the Android map.") },
+            confirmButton = {
+                TextButton(onClick = { confirming = false; onResetArena() }) { Text("Reset") }
+            },
+            dismissButton = { TextButton(onClick = { confirming = false }) { Text("Cancel") } }
+        )
+    }
+}
+
+@Composable
 internal fun ArenaCard(
     state: AppState,
+    onCommand: (RobotCommand) -> Unit,
     onAddObstacle: (GridPoint) -> Unit,
     onMoveObstacle: (String, Int, Int) -> Unit,
     onRemoveObstacle: (String) -> Unit,
@@ -417,6 +474,7 @@ internal fun ArenaCard(
     onSelectRobot: () -> Unit,
     onCloseRobotSettings: () -> Unit,
     onSendArena: () -> Unit,
+    onResetArena: () -> Unit,
     onClearObstacleTarget: (String) -> Unit,
     onClearObstacleSelection: () -> Unit
 ) {
@@ -441,12 +499,13 @@ internal fun ArenaCard(
             )
         }
         ArenaLegendRow(
-            connected = state.connected,
-            enabled = state.canSendArena,
-            onSendArena = onSendArena
+            state = state,
+            onCommand = onCommand,
+            onSendArena = onSendArena,
+            onResetArena = onResetArena,
         )
         state.taskRun?.let { Text(it.description(), style = MaterialTheme.typography.bodySmall) }
-        if (selected != null && !state.arenaLocked) {
+        if (selected != null) {
             TargetFaceSelection(
                 obstacle = selected,
                 onSetObstacleFace = onSetObstacleFace,
@@ -455,7 +514,7 @@ internal fun ArenaCard(
                 onDone = onClearObstacleSelection
             )
         }
-        if (robotSettingsVisible && !state.arenaLocked) {
+        if (robotSettingsVisible) {
             RobotStartCard(
                 robot = state.robot,
                 onSetPose = onSetRobotPose,
@@ -632,9 +691,10 @@ internal fun ArenaMetric(label: String, value: String, modifier: Modifier = Modi
  * too narrow (the landscape Arena layout's grid column) for everything to fit on one. */
 @Composable
 internal fun ArenaLegendRow(
-    connected: Boolean,
-    enabled: Boolean,
+    state: AppState,
+    onCommand: (RobotCommand) -> Unit,
     onSendArena: () -> Unit,
+    onResetArena: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     BoxWithConstraints(modifier.fillMaxWidth()) {
@@ -648,8 +708,12 @@ internal fun ArenaLegendRow(
                     ArenaLegendItem(TargetAmber, "Target")
                     ArenaLegendItem(RobotGreen, "Robot")
                 }
-                ConnectionPill(connected = connected)
-                SendArenaButton(enabled = enabled, onSendArena = onSendArena, label = "Send arena")
+                ConnectionPill(connected = state.connected)
+                Column(modifier = Modifier.width(160.dp), verticalArrangement = Arrangement.spacedBy(SpaceXs)) {
+                    SendArenaButton(enabled = state.canSendArena, onSendArena = onSendArena, label = "Send arena", modifier = Modifier.fillMaxWidth())
+                    TaskStartButton(state, RobotCommand.BEGIN_EXPLORE, onCommand, Modifier.fillMaxWidth())
+                    ResetArenaButton(onResetArena, Modifier.fillMaxWidth())
+                }
             }
         } else {
             Column(verticalArrangement = Arrangement.spacedBy(SpaceXs)) {
@@ -659,9 +723,11 @@ internal fun ArenaLegendRow(
                     ArenaLegendItem(RobotGreen, "Robot")
                 }
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(SpaceSm)) {
-                    ConnectionPill(connected = connected)
-                    SendArenaButton(enabled = enabled, onSendArena = onSendArena, label = "Send arena")
+                    ConnectionPill(connected = state.connected)
+                    SendArenaButton(enabled = state.canSendArena, onSendArena = onSendArena, label = "Send arena")
                 }
+                TaskStartButton(state, RobotCommand.BEGIN_EXPLORE, onCommand)
+                ResetArenaButton(onResetArena)
             }
         }
     }
@@ -870,7 +936,6 @@ internal fun ArenaCanvas(
                 awaitEachGesture {
                     try {
                         val down = awaitFirstDown()
-                        if (latestState.arenaLocked) return@awaitEachGesture
                         val start = down.position
                         val startPoint = gridPoint(start, size.width.toFloat(), size.height.toFloat())
                         val startState = latestState
@@ -908,7 +973,6 @@ internal fun ArenaCanvas(
                         }
 
                         if (!released) return@awaitEachGesture
-                        if (latestState.arenaLocked) return@awaitEachGesture
                         // A map reset or deletion during the hold must not act on a removed obstacle.
                         if (obstacleId != null && latestState.obstacles.none { it.id == obstacleId }) return@awaitEachGesture
                         val releasedAt = gridPoint(current, size.width.toFloat(), size.height.toFloat())
