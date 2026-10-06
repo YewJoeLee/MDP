@@ -97,9 +97,10 @@ android_fd = None
 
 # Must match config.py on the laptop (forward cm, right cm, clockwise quarter-turns).
 TURN_MODELS = {
-    "RT90": (21, 31, 1), "LT90": (21, -35, -1),
-    "XL90": (-26, -11, 1), "XR90": (-35, 13, -1),
+    "RT90": (31, 47, 1),  "LT90": (20, -34, -1),
+    "XL90": (-31, -25, 1), "XR90": (-47, 27, -1),
 }
+
 HEADINGS = ["N", "E", "S", "W"]
 HEAD_VEC = {"N": (0, 1), "E": (1, 0), "S": (0, -1), "W": (-1, 0)}
 CELL_CM = 10
@@ -501,7 +502,6 @@ def check_obstacle_side():
         print(f"      Camera   : side check failed: {error}")
         traceback.print_exc()
         return None
-    
 
 # ----------------------------------------------------------------------
 # Android Bluetooth
