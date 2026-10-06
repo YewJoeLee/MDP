@@ -21,8 +21,8 @@ LEGACY_DEFAULT_START = (1, 1, "N")
 DIRECTION_STEP = {"N": (0, 1), "E": (1, 0), "S": (0, -1), "W": (-1, 0)}
 # (forward cm, right cm, clockwise quarter-turns): modal measured endpoints.
 TURN_MODELS = {
-    "RT90": (24, 40, 1),  "LT90": (16, -26, -1),
-    "XL90": (-26, -17, 1), "XR90": (-39, 26, -1),
+    "RT90": (31, 47, 1),  "LT90": (20, -34, -1),
+    "XL90": (-31, -25, 1), "XR90": (-47, 27, -1),
 }
 ALL_MOVES = ("FW", "BW", "LT90", "RT90", "XL90", "XR90")
 STRAIGHT_STEP_CM = 1
@@ -33,7 +33,7 @@ TURN_SAMPLE_DEGREES = 3.0
 MAX_SEARCH_EXPANSIONS = 180000
 PLAN_TIME_LIMIT_S = 59.0  # below unchanged client's 60-second timeout
 ERROR_CORRECTION_ENABLED = True  # True: at most one correction per obstacle; False: none
-ALIGN_ENABLED = False
+ALIGN_ENABLED = True
 ALIGN_TARGET_CM = 10
 SENSOR_FORWARD_CM = 12.0  # Center-sensor distance
 # Maximum TOTAL distance AC20 may move from where it starts, adding up

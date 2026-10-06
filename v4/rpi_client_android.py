@@ -439,6 +439,12 @@ def check_obstacle_side():
     body in the frame - not the printed image or bullseye - so this still
     works even when no symbol is fully visible. No model needed.
 
+    Prefers the blob whose pixel width matches what the real obstacle is
+    expected to look like at the robot's normal photo-taking distance,
+    instead of just picking the largest dark blob - that's how background
+    clutter (shoes, furniture) at a different distance gets ignored even
+    if it happens to have a bigger silhouette.
+
     Returns "left", "right", or None if the obstacle isn't in frame at all.
     """
     if picam2 is None:
@@ -448,7 +454,9 @@ def check_obstacle_side():
         print("      Camera   : cv2 not available, cannot check obstacle side")
         return None
 
-    MIN_OBSTACLE_AREA_PX = 800   # ignore small dark specks/shadows as noise
+    MIN_OBSTACLE_AREA_PX = 800 #ignore small dark specks/shadows as noise
+    EXPECTED_WIDTH_PX = 140 #The pixel width the real obstacle is expected to show up at, from the robot's normal photo-taking distance. 
+    EXPECTED_WIDTH_TOLERANCE_PX = 45 #accept EXPECTED_WIDTH_PX +/- this
 
     try:
         frame = picam2.capture_array()
@@ -462,12 +470,25 @@ def check_obstacle_side():
             print("      Camera   : no dark obstacle body found")
             return None
 
-        biggest = max(contours, key=cv2.contourArea)
-        if cv2.contourArea(biggest) < MIN_OBSTACLE_AREA_PX:
-            print("      Camera   : obstacle not in view (largest dark region too small)")
+        candidates = []
+        
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < MIN_OBSTACLE_AREA_PX:
+                continue
+            x, y, w, h = cv2.boundingRect(contour)
+            width_error = abs(w - EXPECTED_WIDTH_PX)
+            if width_error > EXPECTED_WIDTH_TOLERANCE_PX:
+                continue
+            candidates.append((width_error, x, w))
+
+        if not candidates:
+            print("      Camera   : nothing matched the obstacle's expected size")
             return None
 
-        x, y, w, h = cv2.boundingRect(biggest)
+        # Smallest width_error wins: the blob closest to the obstacle's
+        # expected on-frame size, not just the biggest blob.
+        _, x, w = min(candidates, key=lambda c: c[0])
         box_center_x = x + w / 2
         frame_center_x = FRAME_SIZE[0] / 2
 
