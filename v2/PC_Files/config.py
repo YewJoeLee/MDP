@@ -15,8 +15,8 @@ LEGACY_DEFAULT_START = (1, 1, "N")
 DIRECTION_STEP = {"N": (0, 1), "E": (1, 0), "S": (0, -1), "W": (-1, 0)}
 # (forward cm, right cm, clockwise quarter-turns): modal measured endpoints.
 TURN_MODELS = {
-    "RT90": (21, 31, 1), "LT90": (21, -35, -1),
-    "XL90": (-26, -11, 1), "XR90": (-35, 13, -1),
+    "RT90": (31, 47, 1),  "LT90": (20, -34, -1),
+    "XL90": (-31, -25, 1), "XR90": (-47, 27, -1),
 }
 ALL_MOVES = ("FW", "BW", "LT90", "RT90", "XL90", "XR90")
 STRAIGHT_STEP_CM = 1
