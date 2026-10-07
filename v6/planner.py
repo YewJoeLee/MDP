@@ -128,6 +128,7 @@ def apply(pose, move):
 class Geometry:
     def __init__(self, obstacles):
         self.rects = [obstacle_rect(o) for o in obstacles]
+        self.rect_ids = [o[0] for o in obstacles]
         self.extent = config.GRID*config.CELL_CM
         self.templates, self.edges = {}, {}
         for h in HEADINGS:
@@ -164,6 +165,38 @@ class Geometry:
             return False
         gap = config.MIN_CLEARANCE_CM + config.POSITION_MARGIN_CM
         return all(rect_gap(box, obstacle) >= gap-1e-8 for obstacle in self.rects)
+
+    def box_problem(self, box):
+        """Why box_valid(box) is False, in words (None when it is valid)."""
+        boundary = config.BOUNDARY_MARGIN_CM + config.POSITION_MARGIN_CM
+        walls = [("left (x=0)", box[0] - boundary), ("bottom (y=0)", box[1] - boundary),
+                 (f"right (x={self.extent:g})", self.extent - boundary - box[2]),
+                 (f"top (y={self.extent:g})", self.extent - boundary - box[3])]
+        for name, slack in walls:
+            if slack < -1e-8:
+                d = slack + boundary
+                where = (f"robot body would go {-d:.1f} cm past the wall" if d < 0
+                         else f"robot body {d:.1f} cm from the wall, needs {boundary:g} cm "
+                              "(BOUNDARY_MARGIN_CM + POSITION_MARGIN_CM)")
+                return f"arena wall {name}: {where}"
+        gap = config.MIN_CLEARANCE_CM + config.POSITION_MARGIN_CM
+        worst = None
+        for oid, rect in zip(self.rect_ids, self.rects):
+            g = rect_gap(box, rect)
+            if g < gap - 1e-8 and (worst is None or g < worst[1]):
+                worst = (oid, g)
+        if worst:
+            return (f"obstacle {worst[0]}: robot body {worst[1]:.1f} cm away, needs {gap:g} cm "
+                    f"(MIN_CLEARANCE_CM {config.MIN_CLEARANCE_CM:g} + POSITION_MARGIN_CM {config.POSITION_MARGIN_CM:g})")
+        return None
+
+    def straight_problem(self, pose, low, high):
+        """Why straight_clear(pose, low, high) is False, in words (None if clear)."""
+        fx, fy = config.DIRECTION_STEP[pose[2]]
+        angle = HEADINGS.index(pose[2])*math.pi/2
+        a = body_box(pose[0]+fx*low, pose[1]+fy*low, angle)
+        b = body_box(pose[0]+fx*high, pose[1]+fy*high, angle)
+        return self.box_problem((min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3])))
 
     def pose_valid(self, pose):
         return self.box_valid(body_box(pose[0], pose[1], HEADINGS.index(pose[2])*math.pi/2))
@@ -310,29 +343,48 @@ def snap_retry_bounds(geometry, obstacle, goal):
     hx, hy = config.DIRECTION_STEP[goal[2]]
     minimum = config.SNAP_RETRY_MIN_MOVE_CM
 
-    def bound(name, command, sign, wanted, limit_name):
-        cm = int(math.floor(wanted + 1e-9))
+    def bound(name, command, sign, wanted, limit_name, wanted_sensor):
+        # Try the full move first, then 1 cm shorter each time until the whole
+        # straight sweep keeps clearance. Every try is recorded for the RPi log.
+        full = int(math.floor(wanted + 1e-9))
+        cm = full
         limit = limit_name
-        while cm > 0 and not geometry.straight_clear(goal, min(0, sign*cm), max(0, sign*cm)):
-            cm -= 1
+        tries, blocked_by = [], None
+        while cm > 0:
+            problem = geometry.straight_problem(goal, min(0, sign*cm), max(0, sign*cm))
+            tries.append({"move_cm": cm, "sensor_to_face_cm": round(now - sign*cm, 2),
+                          "ok": problem is None, "problem": problem})
+            if problem is None:
+                break
+            blocked_by = problem
             limit = "clearance / arena wall"
+            cm -= 1
         cm = max(cm, 0)
+        info = {"name": name, "move_cm": cm, "wanted_move_cm": max(full, 0),
+                "wanted_sensor_to_face_cm": wanted_sensor,
+                "ideal_sensor_to_face_cm": round(now, 2),
+                "short": cm < full, "blocked_by": blocked_by, "tries": tries,
+                "limited_by": limit}
         if cm < minimum:
-            return {"name": name, "available": False, "move_cm": cm,
-                    "reason": f"no room: only {cm} cm possible ({limit}), need >= {minimum} cm"}
+            info.update({"available": False,
+                         "reason": f"no room: only {cm} cm possible ({limit}), need >= {minimum} cm"
+                                   + (f"; blocked by {blocked_by}" if blocked_by else "")})
+            return info
         pose = (goal[0] + hx*sign*cm, goal[1] + hy*sign*cm, goal[2])
         back = ("FW" if command == "BW" else "BW") + str(cm)
-        return {"name": name, "available": True, "move_cm": cm,
-                "command": f"{command}{cm}", "back_command": back,
-                "pose": [round(pose[0], 2), round(pose[1], 2), pose[2]],
-                "sensor_to_face_cm": round(now - sign*cm, 2), "limited_by": limit}
+        info.update({"available": True, "command": f"{command}{cm}", "back_command": back,
+                     "pose": [round(pose[0], 2), round(pose[1], 2), pose[2]],
+                     "sensor_to_face_cm": round(now - sign*cm, 2)})
+        return info
 
     return {
         "ideal_sensor_to_face_cm": round(now, 2),
         "far": bound("FAR", "BW", -1, config.SNAP_FAR_MAX_SENSOR_CM - now,
-                     f"SNAP_FAR_MAX_SENSOR_CM = {config.SNAP_FAR_MAX_SENSOR_CM:g}"),
+                     f"SNAP_FAR_MAX_SENSOR_CM = {config.SNAP_FAR_MAX_SENSOR_CM:g}",
+                     config.SNAP_FAR_MAX_SENSOR_CM),
         "near": bound("NEAR", "FW", +1, now - config.SNAP_NEAR_MIN_SENSOR_CM,
-                      f"SNAP_NEAR_MIN_SENSOR_CM = {config.SNAP_NEAR_MIN_SENSOR_CM:g}"),
+                      f"SNAP_NEAR_MIN_SENSOR_CM = {config.SNAP_NEAR_MIN_SENSOR_CM:g}",
+                      config.SNAP_NEAR_MIN_SENSOR_CM),
     }
 
 

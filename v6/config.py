@@ -25,7 +25,7 @@ TURN_MODELS = {
     "RT90": (20, 35, 1),  "LT90": (16, -30, -1),
     "XL90": (-35, -20, 1), "XR90": (-40, 28, -1),
 }
-ALL_MOVES = ("FW", "BW", "LT90", "RT90", "XL90", "XR90")
+ALL_MOVES = ("FW", "BW", "LT90", "RT90", "XR90", "XL90")
 STRAIGHT_STEP_CM = 1
 MAX_STRAIGHT_COMMAND_CM = 100  # long drives split for STM timeout
 STRAIGHT_COST_PER_CM = {"FW": 0.10, "BW": 0.15}

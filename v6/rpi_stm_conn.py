@@ -27,13 +27,14 @@ i.e. classes with a numeric image ID; the "Bounding box" class is not counted):
     CASE B  count == 1, conf <  RECOGNISED_CONF  -> BW to the FAR bound, Snap FAR,
                                                    FW to the NEAR bound, Snap NEAR,
                                                    back to the photo pose.
-                                                   Vote over all photos: most photos
-                                                   seen in, then highest average conf.
-                                                   Report the winner's best photo (max 3 photos).
+                                                   Rank every box from all photos by
+                                                   confidence; report the highest (max 3 photos).
     CASE C  count == 0                           -> report nothing (MSG to Android).
-    CASE D  count >= 2                           -> FW to the NEAR bound, Snap NEAR, back.
-                                                   NEAR count == 1 -> report it
-                                                   otherwise       -> report nothing (max 2 photos).
+    CASE D  count >= 2                           -> IDEAL boxes are held, FW to the NEAR
+                                                   bound, Snap NEAR, back. Rank every box
+                                                   from IDEAL + NEAR by confidence and
+                                                   report the highest.
+                                                   (max 2 photos)
 
 FAR / NEAR distances come from the planner (segment target["retry"]); they are
 already cut short to keep MIN_CLEARANCE_CM. If a bound has no room, that photo
@@ -421,6 +422,99 @@ def _as_snap(raw, label, attempt):
     return snap
 
 
+# ---- diagnosis helpers ------------------------------------------------
+
+def ideal_case(targets):
+    """
+    The CASE the boxes on the IDEAL photo lead to, and a one-line reason.
+    photo_cycle() and the photo overlay both use this, so they always agree.
+    """
+    n = len(targets)
+    if n == 1 and targets[0]["conf"] >= RECOGNISED_CONF:
+        return "A", f"1 image, conf {targets[0]['conf']:.2f} >= {RECOGNISED_CONF:.2f}"
+    if n == 1:
+        return "B", f"1 image but conf {targets[0]['conf']:.2f} < {RECOGNISED_CONF:.2f}"
+    if n == 0:
+        return "C", "no image ID found"
+    ids = ", ".join(f"ID {t['image_id']} {t['conf']:.2f}" for t in targets)
+    return "D", f"{n} images ({ids})"
+
+
+def photo_position(label, ideal_cm, bound=None):
+    """
+    Where a photo is taken, relative to the planned (IDEAL) photo pose.
+    FAR / NEAR keep their label even when clearance cut the move short;
+    "short" and the tag ("FAR-short") say so.
+        {"label", "tag", "sensor_cm", "wanted_cm", "move", "short", "limit", "text"}
+    """
+    if label == "IDEAL" or not bound:
+        cm = ideal_cm
+        return {"label": label, "tag": label, "sensor_cm": cm, "wanted_cm": cm,
+                "move": "", "short": False, "limit": "",
+                "text": f"IDEAL - planned photo pose, sensor->face {_cm_text(cm)}"}
+    wanted = config.SNAP_FAR_MAX_SENSOR_CM if label == "FAR" else config.SNAP_NEAR_MIN_SENSOR_CM
+    limit = bound.get("blocked_by") or bound.get("limited_by", "")
+    short = bound.get("short", not str(bound.get("limited_by", "")).startswith("SNAP_"))
+    cm = bound.get("sensor_to_face_cm")
+    move = bound.get("command", "")
+    text = (f"{label} - {move} from IDEAL ({_cm_text(ideal_cm)}), sensor->face {_cm_text(cm)}"
+            + (f"  [wanted {wanted:g} cm, CUT SHORT by {limit}]" if short
+               else f"  [full move, reached {wanted:g} cm]"))
+    return {"label": label, "tag": label, "sensor_cm": cm,
+            "wanted_cm": wanted, "move": move, "short": short, "limit": limit, "text": text}
+
+
+def _iou(a, b):
+    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    union = (a[2]-a[0])*(a[3]-a[1]) + (b[2]-b[0])*(b[3]-b[1]) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def box_hints(snap):
+    """
+    For a photo with 2+ target boxes: why is each EXTRA box (2nd, 3rd ...) there?
+    Returns a list of strings, one per extra box. Empty when count <= 1.
+    """
+    t = snap.get("targets") or []
+    if len(t) < 2:
+        return []
+    top = t[0]
+    width = snap.get("frame_w")
+    hints = []
+    for i, d in enumerate(t[1:], 2):
+        why = []
+        if top.get("xyxy") and d.get("xyxy"):
+            iou = _iou(top["xyxy"], d["xyxy"])
+            if iou >= 0.30:
+                why.append(f"overlaps box 1 (IoU {iou:.2f}) -> same card read twice")
+            else:
+                why.append(f"separate from box 1 (IoU {iou:.2f})")
+        if str(d["image_id"]) == str(top["image_id"]):
+            why.append("same ID as box 1 (duplicate)")
+        if d["conf"] < 0.40:
+            why.append(f"weak ({d['conf']:.2f} < 0.40)")
+        if width and d.get("cx") is not None:
+            off = abs(d["cx"] - width / 2) / width
+            if off > 0.30:
+                why.append(f"near frame edge ({d['cx']:.0f}/{width} px) -> other obstacle?")
+        hints.append(f"box {i} ID {d['image_id']} {d['conf']:.2f}: " + "; ".join(why))
+    return hints
+
+
+def _photo_record(s):
+    """Compact record of one photo for the decision / run log."""
+    pos = s.get("position") or {}
+    return {"name": s["name"], "tag": pos.get("tag", s["label"]), "label": s["label"],
+            "sensor_cm": pos.get("sensor_cm"), "wanted_cm": pos.get("wanted_cm"),
+            "short": pos.get("short", False), "limit": pos.get("limit", ""),
+            "why": s.get("why"), "count": len(s["targets"]),
+            "boxes": [(d["image_id"], d["letter"], round(d["conf"], 2)) for d in s["targets"]],
+            "hints": box_hints(s), "file": s.get("file"), "error": s.get("error"),
+            "move_explain": explain_bound(s["bound"], "") if s.get("bound") else []}
+
+
 # ---- printing ---------------------------------------------------------
 
 def _pose_text(pose):
@@ -459,14 +553,9 @@ def print_photo_header(obstacle_id, target):
     retry = target.get("retry") or {}
     for key in ("far", "near"):
         b = retry.get(key)
-        tag = f"Retry {key.upper():<4}"
-        if not b:
-            print(f"    {tag}    : not in plan (old algo server?) - photo disabled")
-        elif b.get("available"):
-            print(f"    {tag}    : {b['command']:<5} -> {_pose_text(b['pose'])}, sensor->face "
-                  f"{_cm_text(b['sensor_to_face_cm'])}   [limit: {b['limited_by']}]")
-        else:
-            print(f"    {tag}    : {b.get('reason', 'no room')}")
+        print(f"    Retry {key.upper():<4}    : (only used for CASE {'B' if key == 'far' else 'B / D'})")
+        for line in explain_bound(b, "        "):
+            print(line)
 
 
 def print_view_preference(target, indent="    "):
@@ -494,8 +583,13 @@ def print_view_preference(target, indent="    "):
 def print_snap(snap, desired_pose=None, sensor_cm=None):
     """One photo: where it was meant to be taken and everything the model saw."""
     print()
-    title = f"-- Snap {snap['attempt']}  {snap['label']} "
+    pos = snap.get("position") or {}
+    title = f"-- Snap {snap['attempt']}  {pos.get('tag', snap['label'])} "
     print("    " + title + "-" * max(4, 64 - len(title)))
+    if pos.get("text"):
+        print(f"    Position      : {pos['text']}")
+    if snap.get("why"):
+        print(f"    Taken because : {snap['why']}")
     if desired_pose is not None or sensor_cm is not None:
         print(f"    Desired pose  : {_pose_text(desired_pose)}   sensor->face {_cm_text(sensor_cm)}")
     if snap.get("file"):
@@ -518,6 +612,10 @@ def print_snap(snap, desired_pose=None, sensor_cm=None):
         print(f"        {i}. {str(d['letter']):<13} conf {d['conf']:.2f}   (not an image ID - not counted)")
     n = len(snap["targets"])
     print(f"    Count         : {n} target image{'s' if n != 1 else ''}")
+    for h in box_hints(snap):
+        print(f"    Extra box     : {h}")
+    if snap["label"] == "IDEAL" and snap.get("case"):
+        print(f"    IDEAL -> CASE : {snap['case']} ({snap.get('case_reason', '')})")
 
 
 def vote_across_snaps(snaps):
@@ -546,6 +644,89 @@ def vote_across_snaps(snaps):
                      "avg": sum(confs) / len(confs), "best": best_conf, "best_snap": best_snap})
     rows.sort(key=lambda r: (-r["seen"], -r["avg"], -r["best"]))
     return rows
+
+
+def rank_by_conf(snaps):
+    """CASE B: every target box from every photo, highest confidence first."""
+    rows = [{"snap": sp, "det": d} for sp in snaps for d in sp["targets"]]
+    rows.sort(key=lambda r: -r["det"]["conf"])
+    return rows
+
+
+def print_ranking(rows, photos):
+    print()
+    print(f"    RANKING over {photos} photo(s)  (every box, highest confidence first)")
+    print(f"        {'#':<3}{'photo':<14}{'dist':>8}  {'ID':<5}{'image':<14}conf")
+    for i, r in enumerate(rows, 1):
+        pos = r["snap"].get("position") or {}
+        dist = _cm_text(pos.get("sensor_cm"))
+        mark = "  <- WINNER" if i == 1 else ""
+        print(f"        {i:<3}{r['snap']['name']:<14}{dist:>8}  {str(r['det']['image_id']):<5}"
+              f"{str(r['det']['letter']):<14}{r['det']['conf']:.2f}{mark}")
+
+
+def explain_bound(b, indent="    "):
+    """
+    Lines describing how the planner chose a FAR / NEAR move: what it wanted,
+    every distance it tried that broke clearance (grouped), and what it used.
+    """
+    if not b:
+        return [f"{indent}not in plan (old algo server?) - photo disabled"]
+    name = b.get("name", "?")
+    cmd = "BW" if name == "FAR" else "FW"
+    ideal = b.get("ideal_sensor_to_face_cm")
+    wanted_s = b.get("wanted_sensor_to_face_cm")
+    wanted_m = b.get("wanted_move_cm")
+    out = []
+    if wanted_m is not None:
+        out.append(f"{indent}wanted {cmd}{wanted_m}: sensor->face {_cm_text(ideal)} -> {wanted_s:g} cm")
+    tries = b.get("tries")
+    if tries is None:          # plan from an older planner.py
+        if b.get("available"):
+            out.append(f"{indent}using {b['command']} -> {_cm_text(b['sensor_to_face_cm'])}  "
+                       f"[limit: {b.get('limited_by', '?')}]  (update planner.py on the laptop for details)")
+        else:
+            out.append(f"{indent}{b.get('reason', 'no room')}")
+        return out
+    groups = []                # consecutive blocked tries with the same cause
+    for t in tries:
+        if t["ok"]:
+            continue
+        who = (t["problem"] or "").split(":")[0]
+        if groups and groups[-1]["who"] == who:
+            groups[-1]["last"] = t
+        else:
+            groups.append({"who": who, "first": t, "last": t})
+    for g in groups:
+        f, l = g["first"], g["last"]
+        if f is l:
+            out.append(f"{indent}{cmd}{f['move_cm']} ({f['sensor_to_face_cm']:g} cm) BLOCKED - {f['problem']}")
+        else:
+            out.append(f"{indent}{cmd}{f['move_cm']}..{cmd}{l['move_cm']} ({f['sensor_to_face_cm']:g}"
+                       f"..{l['sensor_to_face_cm']:g} cm) BLOCKED - {g['who']}")
+            out.append(f"{indent}    closest one ({cmd}{l['move_cm']}): {l['problem']}")
+    if b.get("available"):
+        gap = (wanted_s - b["sensor_to_face_cm"]) if name == "FAR" else (b["sensor_to_face_cm"] - wanted_s)
+        if b.get("short"):
+            out.append(f"{indent}-> using {b['command']}: sensor->face {_cm_text(b['sensor_to_face_cm'])} "
+                       f"({abs(gap):.0f} cm short of {wanted_s:g}, obeys clearance)")
+        else:
+            out.append(f"{indent}-> using {b['command']}: sensor->face {_cm_text(b['sensor_to_face_cm'])} "
+                       "(full move, nothing in the way)")
+    else:
+        out.append(f"{indent}-> {name} photo SKIPPED: {b.get('reason', 'no room')}")
+    return out
+
+
+def print_move_plan(b, from_offset=0):
+    """Printed just before the robot drives to FAR / NEAR."""
+    print(f"    Going {b.get('name', '?')} :")
+    for line in explain_bound(b, "        "):
+        print(line)
+    if from_offset:
+        net = b["move_cm"] - from_offset if b.get("name") == "NEAR" else -b["move_cm"] - from_offset
+        print(f"        (robot is {abs(from_offset)} cm {'back' if from_offset < 0 else 'forward'} "
+              f"of IDEAL now, so it drives {'FW' if net > 0 else 'BW'}{abs(net)})")
 
 
 def print_vote(rows, photos):
@@ -627,9 +808,24 @@ def photo_cycle(ser, obstacle_id, last_turn_cmd, last_straight_cmd, on_snap, on_
         offset = new_offset
         return True
 
-    def snap(label, total, desired, sensor_cm):
-        s = take_snap(on_snap, oid, len(snaps) + 1, total, label,
-                      plan={"pose": desired, "sensor_to_face_cm": sensor_cm})
+    ideal_cm = target.get("expected_sensor_to_face_cm")
+    skipped = []          # FAR / NEAR photos that were wanted but had no room
+
+    def snap(label, total, desired, sensor_cm, bound=None, case=None, why=None):
+        pos = photo_position(label, ideal_cm, bound)
+        plan = {"pose": desired, "sensor_to_face_cm": sensor_cm, "position": pos,
+                "case": case, "why": why,
+                "classify": ideal_case if label == "IDEAL" else None}
+        s = take_snap(on_snap, oid, len(snaps) + 1, total, label, plan=plan)
+        s["position"] = pos
+        s["why"] = why
+        s["bound"] = bound
+        if label == "IDEAL":
+            s["case"], s["case_reason"] = ideal_case(s["targets"])
+        else:
+            s.setdefault("case", case)
+        if not s.get("file"):           # no camera: still name it by position
+            s["name"] = f"Snap{s['attempt']}_{pos['tag']}"
         snaps.append(s)
         print_snap(s, desired, sensor_cm)
         return s
@@ -652,30 +848,39 @@ def photo_cycle(ser, obstacle_id, last_turn_cmd, last_straight_cmd, on_snap, on_
         plan_far, plan_near = bool(far.get("available")), bool(near.get("available"))
         total = 1 + plan_far + plan_near
         print(f"    DECISION      : CASE B - 1 image but conf {d['conf']:.2f} < {RECOGNISED_CONF:.2f}"
-              "  ->  extra photos at FAR and NEAR, then vote")
+              "  ->  also take FAR and NEAR, then report the highest confidence of all photos")
         if not plan_far:
             print(f"                    FAR photo skipped: {far.get('reason', 'no plan info')}")
+            skipped.append(f"FAR skipped: {far.get('reason', 'no plan info')}")
         if not plan_near:
             print(f"                    NEAR photo skipped: {near.get('reason', 'no plan info')}")
+            skipped.append(f"NEAR skipped: {near.get('reason', 'no plan info')}")
+        if total < 3:
+            print(f"                    -> only {total} photo(s) for this CASE B")
         print()
-        if plan_far and drive_to(-far["move_cm"], "to FAR"):
-            snap("FAR", total, far["pose"], far["sensor_to_face_cm"])
-            print()
-        if plan_near and moves_ok and drive_to(near["move_cm"], "to NEAR"):
-            snap("NEAR", total, near["pose"], near["sensor_to_face_cm"])
-            print()
+        why_b = f"CASE B - IDEAL had 1 image, conf {d['conf']:.2f} < {RECOGNISED_CONF:.2f}"
+        if plan_far:
+            print_move_plan(far)
+            if drive_to(-far["move_cm"], "to FAR"):
+                snap("FAR", total, far["pose"], far["sensor_to_face_cm"], far, "B", why_b)
+                print()
+        if plan_near and moves_ok:
+            print_move_plan(near, from_offset=offset)
+            if drive_to(near["move_cm"], "to NEAR"):
+                snap("NEAR", total, near["pose"], near["sensor_to_face_cm"], near, "B", why_b)
+                print()
         if moves_ok:
             drive_to(0, "back")
-        rows = vote_across_snaps(snaps)
-        print_vote(rows, len(snaps))
+        rows = rank_by_conf(snaps)
+        print_ranking(rows, len(snaps))
         w = rows[0]
-        best = next(t for t in w["best_snap"]["targets"] if str(t["image_id"]) == str(w["image_id"]))
-        tie = len(rows) > 1 and rows[1]["seen"] == w["seen"]
-        why = (f"seen in {w['seen']}/{len(snaps)} photos" +
-               (f", higher average conf than ID {rows[1]['image_id']}" if tie else "") +
-               f"; best photo {w['best_snap']['name']}")
-        print(f"    Winner        : ID {w['image_id']} ({w['letter']}) - {why}")
-        decision = _decision("B", f"vote over {len(snaps)} photos: {why}", w["best_snap"], best)
+        why = (f"highest confidence of {len(rows)} box(es) over {len(snaps)} photo(s): "
+               f"ID {w['det']['image_id']} {w['det']['conf']:.2f} on {w['snap']['name']}")
+        print(f"    Winner        : {why}")
+        decision = _decision("B", why, w["snap"], w["det"])
+        decision["ranking"] = [(r["snap"]["name"], (r["snap"].get("position") or {}).get("sensor_cm"),
+                                r["det"]["image_id"], r["det"]["letter"], round(r["det"]["conf"], 2))
+                               for r in rows]
 
     elif n == 0:
         print("    DECISION      : CASE C - no image found  ->  report nothing (no extra photos)")
@@ -683,31 +888,52 @@ def photo_cycle(ser, obstacle_id, last_turn_cmd, last_straight_cmd, on_snap, on_
 
     else:
         ids = ", ".join(f"ID {t['image_id']} ({t['conf']:.2f})" for t in s1["targets"])
-        print(f"    DECISION      : CASE D - {n} images ({ids})  ->  move closer, NEAR photo")
+        print(f"    DECISION      : CASE D - {n} images on IDEAL  ->  held, move NEAR, "
+              "rank IDEAL + NEAR boxes, report the top one")
+        for i, t in enumerate(s1["targets"], 1):
+            print(f"                    IDEAL box {i}: ID {t['image_id']} ({t['letter']}) conf {t['conf']:.2f}")
+        for h in box_hints(s1):
+            print(f"                    {h}")
+        why_d = f"CASE D - IDEAL had {n} images ({ids})"
+        s2, no_near = None, None
         if not near.get("available"):
+            no_near = f"no room for a NEAR photo ({near.get('reason', 'no plan info')})"
             print(f"                    NEAR photo skipped: {near.get('reason', 'no plan info')}")
-            decision = _decision("D", f"{n} images on IDEAL and no room for a NEAR photo")
+            skipped.append(f"NEAR skipped: {near.get('reason', 'no plan info')}")
         else:
             print()
-            s2 = None
+            print_move_plan(near)
             if drive_to(near["move_cm"], "to NEAR"):
-                s2 = snap("NEAR", 2, near["pose"], near["sensor_to_face_cm"])
+                s2 = snap("NEAR", 2, near["pose"], near["sensor_to_face_cm"], near, "D", why_d)
                 print()
                 drive_to(0, "back")
-            print()
-            if s2 is None:
-                decision = _decision("D", "could not drive to the NEAR pose")
-            elif len(s2["targets"]) == 1:
-                d = s2["targets"][0]
-                print(f"    NEAR result   : exactly 1 image -> ID {d['image_id']} ({d['letter']}), "
-                      f"conf {d['conf']:.2f}")
-                decision = _decision("D", "NEAR photo showed exactly 1 image", s2, d)
             else:
-                print(f"    NEAR result   : {len(s2['targets'])} images -> still not one, report nothing")
-                decision = _decision("D", f"NEAR photo still showed {len(s2['targets'])} images")
+                no_near = "could not drive to the NEAR pose"
+        print()
+        if no_near:
+            print(f"    NEAR result   : {no_near} - ranking the IDEAL boxes only")
+        rows = rank_by_conf(snaps)          # IDEAL boxes + NEAR boxes, highest conf first
+        print_ranking(rows, len(snaps))
+        w = rows[0]
+        why = (f"highest confidence of {len(rows)} box(es) over {len(snaps)} photo(s): "
+               f"ID {w['det']['image_id']} {w['det']['conf']:.2f} on {w['snap']['name']}"
+               + (f" ({no_near})" if no_near else ""))
+        print(f"    Winner        : {why}")
+        decision = _decision("D", why, w["snap"], w["det"])
+        decision["ranking"] = [(r["snap"]["name"], (r["snap"].get("position") or {}).get("sensor_cm"),
+                                r["det"]["image_id"], r["det"]["letter"], round(r["det"]["conf"], 2))
+                               for r in rows]
 
     # ---- result ----------------------------------------------------------
+    decision["photos"] = [_photo_record(s) for s in snaps]
+    decision["skipped"] = skipped
+    decision["ideal_case_reason"] = snaps[0].get("case_reason") if snaps else None
     print()
+    print(f"    PHOTOS TAKEN  : {len(snaps)}  ->  "
+          + "  |  ".join(f"{p['name']} {_cm_text(p['sensor_cm'])} count {p['count']}"
+                         for p in decision["photos"]))
+    for line in skipped:
+        print(f"                    {line}")
     if decision["image_id"] is not None:
         print(f"    RESULT        : ID {decision['image_id']} ({decision['letter']}), conf "
               f"{decision['conf']:.2f}, from {decision['snap']}")
@@ -742,6 +968,9 @@ def print_photo_summary():
         result = (f"ID {d['image_id']} ({d['letter']}, {d['conf']:.2f}) from {d['snap']}"
                   if e["recognised"] else "nothing")
         print(f"  Obstacle {e['obstacle']:<3} CASE {e['case']}  {e['snaps']} photo(s)  ->  {result}")
+        for p in d.get("photos", []):
+            print(f"      {p['name']:<22} {_cm_text(p['sensor_cm']):>8}  count {p['count']}  "
+                  + (", ".join(f"ID {b[0]} {b[2]:.2f}" for b in p["boxes"]) or "-"))
     print(WIDE)
 
 

@@ -15,15 +15,18 @@ Replay :  python3 rpi_stm_conn.py -f cmds/latest.txt   (uses cmds/latest.txt.tar
   CASE A  count 1, conf >= RECOGNISED_CONF (0.50)  -> report it                      (1 photo)
   CASE B  count 1, conf <  0.50                    -> BW to FAR, snap, FW to NEAR,
                                                       snap, back to the photo pose.
-                                                      Vote: most photos seen in, then
-                                                      highest average conf. Report the
-                                                      winner's best-confidence photo.  (max 3 photos)
+                                                      Rank EVERY box from all photos by
+                                                      confidence; report the highest.  (max 3 photos)
   CASE C  count 0                                  -> report nothing (MSG to Android)  (1 photo)
-  CASE D  count 2+                                 -> FW to NEAR, snap, back.
-                                                      NEAR count 1 -> report it,
-                                                      otherwise report nothing.        (max 2 photos)
+  CASE D  count 2+                                 -> IDEAL boxes held, FW to NEAR, snap,
+                                                      back. Rank every box from IDEAL +
+                                                      NEAR by confidence; report the top.  (max 2 photos)
 
-Photos: photos/Trial_<run>_Obstacle_<id>_Snap<n>_<IDEAL|FAR|NEAR>.jpg
+Photos: photos/Trial_<run>_Obstacle_<id>_Snap<n>_Case<X>_<cm>cm[_short]_<IDEAL|FAR|NEAR>.jpg
+        (position tag always last; _short = clearance stopped the FAR/NEAR move early)
+Log:    photos/Trial_<run>_diagnosis.txt  - every photo, every box, why it was taken,
+        how the planner chose each FAR/NEAR distance (what was blocked and by what),
+        and the CASE B ranking.
 
 Viewing distance preference (planner, config.py):
   VIEW_PREFERRED_SENSOR_CM = 30   costs 0, so 30 cm is tried first

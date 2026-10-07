@@ -121,8 +121,13 @@ def serve_connection(conn, addr):
                         t = seg["target"]
                         r = t.get("retry", {})
                         def show(b):
-                            return (f"{b['command']} -> {b['sensor_to_face_cm']:.1f} cm" if b.get("available")
-                                    else "no room")
+                            if not b.get("available"):
+                                return "no room"
+                            cut = ""
+                            if b.get("short"):
+                                who = str(b.get("blocked_by") or "clearance").split(":")[0].split(" (")[0]
+                                cut = f" (wanted {b.get('wanted_sensor_to_face_cm', 0):g}, cut by {who})"
+                            return f"{b['command']} -> {b['sensor_to_face_cm']:.1f} cm{cut}"
                         gp = t["goal_view_pose"]
                         print(f"[{addr}]   obstacle {seg['obstacle_id']}: photo pose ({gp[0]:.1f}, {gp[1]:.1f}) "
                               f"{gp[2]}, sensor->face {t['expected_sensor_to_face_cm']:.1f} cm "

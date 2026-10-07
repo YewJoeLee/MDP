@@ -3,9 +3,9 @@ RPi client for Android integration (v5).
 
 v5: every SNAP runs the v5 photo rules in rpi_stm_conn.photo_cycle():
     CASE A 1 image, conf >= 0.50   -> report it (1 photo)
-    CASE B 1 image, conf <  0.50   -> extra FAR + NEAR photos, vote (max 3 photos)
+    CASE B 1 image, conf <  0.50   -> extra FAR + NEAR photos, report highest conf (max 3 photos)
     CASE C no image                -> report nothing
-    CASE D 2+ images               -> extra NEAR photo; exactly 1 there -> report it (max 2 photos)
+    CASE D 2+ images               -> hold them, NEAR photo, rank IDEAL+NEAR, report top (max 2 photos)
 trigger_camera() only takes and reads the photo; report_result() talks to Android.
 Photos: photos/Trial_<run>_Obstacle_<id>_Snap<n>_<IDEAL|FAR|NEAR>.jpg
 
@@ -327,8 +327,21 @@ def current_trial():
     return run_trial
 
 
-def photo_name(obstacle_id, attempt, label="IDEAL"):
-    return f"Trial_{current_trial()}_Obstacle_{obstacle_id}_Snap{attempt}_{label}.jpg"
+def photo_name(obstacle_id, attempt, label="IDEAL", sensor_cm=None, case=None, short=False):
+    """
+    Trial_<t>_Obstacle_<id>_Snap<n>_Case<X>_<cm>cm[_short]_<IDEAL|FAR|NEAR>.jpg
+    The position tag is ALWAYS last. <cm> is the planned sensor->face distance,
+    "_short" means clearance stopped the FAR / NEAR move before its target.
+    Case<X> is the CASE the IDEAL photo gave (A-D), i.e. why extra photos were taken.
+    """
+    why = f"_Case{case}" if case else ""
+    dist = f"_{float(sensor_cm):.0f}cm" if sensor_cm is not None else ""
+    cut = "_short" if short else ""
+    return f"Trial_{current_trial()}_Obstacle_{obstacle_id}_Snap{attempt}{why}{dist}{cut}_{label}.jpg"
+
+
+def diagnosis_path():
+    return os.path.join(PHOTO_DIR, f"Trial_{current_trial()}_diagnosis.txt")
 
 
 def print_target_debug(obstacle_id, indent="      "):
@@ -353,7 +366,11 @@ def print_target_debug(obstacle_id, indent="      "):
         if not b:
             parts.append(f"{key.upper()} n/a")
         elif b.get("available"):
-            parts.append(f"{key.upper()} {b['command']} -> {b['sensor_to_face_cm']:.1f} cm")
+            cut = ""
+            if b.get("short"):
+                who = str(b.get("blocked_by") or "clearance").split(":")[0].split(" (")[0]
+                cut = f" (wanted {b.get('wanted_sensor_to_face_cm', 0):g} cm, cut by {who})"
+            parts.append(f"{key.upper()} {b['command']} -> {b['sensor_to_face_cm']:.1f} cm{cut}")
         else:
             parts.append(f"{key.upper()} no room")
     print(f"{indent}extra photos: {'   '.join(parts)}")
@@ -376,7 +393,7 @@ def read_detections(result, names):
         image_id = letter2number.get(letter)
         x1, _y1, x2, _y2 = (float(v) for v in boxes.xyxy[i].tolist())
         entry = {"letter": letter, "image_id": image_id, "conf": float(boxes.conf[i]),
-                 "cx": (x1 + x2) / 2, "w": x2 - x1}
+                 "cx": (x1 + x2) / 2, "w": x2 - x1, "xyxy": (x1, _y1, x2, _y2)}
         (targets if image_id is not None and str(image_id).isdigit() else ignored).append(entry)
     targets.sort(key=lambda d: -d["conf"])
     ignored.sort(key=lambda d: -d["conf"])
@@ -397,7 +414,10 @@ def trigger_camera(obstacle_id, attempt=1, final=True, label="IDEAL", plan=None)
          "infer_ms", "error"}
     """
     send_line("MSG,[Taking photo]")      # robot is stopped; replace the "Moving" status
-    name = f"Snap{attempt}_{label}"
+    plan = plan or {}
+    pos = plan.get("position") or {}
+    tag = pos.get("tag", label)          # IDEAL / FAR / NEAR / FAR-short / NEAR-short
+    name = f"Snap{attempt}_{tag}"
     snap = {"label": label, "attempt": attempt, "name": name, "file": None,
             "targets": [], "ignored": [], "infer_ms": None, "error": None}
 
@@ -411,23 +431,54 @@ def trigger_camera(obstacle_id, attempt=1, final=True, label="IDEAL", plan=None)
         results = model(frame, conf=MODEL_MIN_CONF, imgsz=416, verbose=False)
         snap["infer_ms"] = (time.time() - t0) * 1000
         snap["targets"], snap["ignored"] = read_detections(results[0], model.names)
+        snap["frame_h"], snap["frame_w"] = frame.shape[0], frame.shape[1]
 
-        # Label the saved photo (plot() draws every box with its class name).
-        final_frame = results[0].plot()
+        # Which CASE this photo belongs to: IDEAL works it out from its own
+        # boxes (same rule as photo_cycle); FAR / NEAR carry the CASE that sent them.
+        if plan.get("classify"):
+            snap["case"], snap["case_reason"] = plan["classify"](snap["targets"])
+        else:
+            snap["case"], snap["case_reason"] = plan.get("case"), plan.get("why")
+
+        # Saved photo = model boxes on the image + a black info strip underneath,
+        # so the text never covers the card.
+        boxed = results[0].plot()
         n = len(snap["targets"])
-        top = snap["targets"][0] if n else None
-        line1 = f"Obs {obstacle_id}  {name}  count {n}"
-        line2 = (f"top: ID {top['image_id']} {top['letter']} ({top['conf']:.2f})"
-                 if top else "no image ID found")
-        line3 = f"Trial {current_trial()}"
-        for text, y in ((line1, 30), (line2, 58), (line3, 86)):
-            cv2.putText(final_frame, text, (10, y), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7, (0, 0, 0), 4, cv2.LINE_AA)   # dark outline for contrast
-            cv2.putText(final_frame, text, (10, y), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7, (0, 255, 0), 2, cv2.LINE_AA)
+        sensor_cm = pos.get("sensor_cm", plan.get("sensor_to_face_cm"))
+        lines = [f"Obs {obstacle_id} | Snap{attempt} {tag}{' (short)' if pos.get('short') else ''} | "
+                 + (f"{float(sensor_cm):.0f}cm" if sensor_cm is not None else "?cm")
+                 + f" | Trial {current_trial()}"]
+        if label == "IDEAL":
+            lines.append("planned photo pose")
+        else:
+            who = str(pos.get("limit", "")).split(":")[0].split(" (")[0]
+            lines.append(f"{pos.get('move', '')} from IDEAL, wanted {pos.get('wanted_cm', 0):g}cm"
+                         + (f", cut by {who}" if pos.get("short") else ", full move"))
+        if label == "IDEAL":
+            lines.append(f"CASE {snap['case']}: {snap['case_reason']}")
+        else:
+            lines.append(f"taken for CASE {snap['case'] or '?'}")
+        lines.append(f"count {n}" + ("" if n else " - no image ID found"))
+        for i, d in enumerate(snap["targets"][:4], 1):
+            lines.append(f" {i}. ID {d['image_id']} {d['letter']} {d['conf']:.2f}  x={d['cx']:.0f}")
+        if n > 4:
+            lines.append(f" ... +{n - 4} more")
+
+        font, scale, step = cv2.FONT_HERSHEY_SIMPLEX, 0.42, 17
+        width = boxed.shape[1]
+        max_chars = max(20, int(width / 7.4))
+        strip = step * len(lines) + 8
+        final_frame = cv2.copyMakeBorder(boxed, 0, strip, 0, 0, cv2.BORDER_CONSTANT, value=(0, 0, 0))
+        colour = {"A": (0, 255, 0), "B": (0, 200, 255), "C": (180, 180, 180), "D": (0, 0, 255)}
+        y = boxed.shape[0] + step
+        for k, text in enumerate(lines):
+            c = colour.get(snap["case"], (255, 255, 255)) if k == 2 else (255, 255, 255)
+            cv2.putText(final_frame, text[:max_chars], (6, y), font, scale, c, 1, cv2.LINE_AA)
+            y += step
 
         os.makedirs(PHOTO_DIR, exist_ok=True)
-        path = os.path.join(PHOTO_DIR, photo_name(obstacle_id, attempt, label))
+        path = os.path.join(PHOTO_DIR, photo_name(obstacle_id, attempt, tag, sensor_cm, snap["case"],
+                                                  pos.get("short", False)))
         if cv2.imwrite(path, final_frame):
             snap["file"] = path
         else:
@@ -448,6 +499,54 @@ def report_result(obstacle_id, decision):
     """
     photo_results[str(obstacle_id)] = decision
     send_to_android(obstacle_id, decision["image_id"])
+    write_diagnosis(obstacle_id, decision)
+
+
+def write_diagnosis(obstacle_id, decision):
+    """Append one obstacle's photo story to photos/Trial_<t>_diagnosis.txt."""
+    photos = decision.get("photos") or []
+    out = [f"Obstacle {obstacle_id}: CASE {decision['case']}  {len(photos)} photo(s)  ->  "
+           + (f"ID {decision['image_id']} ({decision['letter']}, {decision['conf']:.2f}) from {decision['snap']}"
+              if decision["image_id"] is not None else "NOTHING reported"),
+           f"    IDEAL gave : {decision.get('ideal_case_reason') or '?'}",
+           f"    decision   : {decision['reason']}"]
+    for p in photos:
+        cm = "?" if p["sensor_cm"] is None else f"{float(p['sensor_cm']):.1f} cm"
+        boxes = ", ".join(f"ID {b[0]} {b[1]} {b[2]:.2f}" for b in p["boxes"]) or "no image ID"
+        extra = ""
+        if p["label"] != "IDEAL":
+            extra = (f"  (wanted {p['wanted_cm']:g} cm, CUT SHORT)" if p["short"]
+                     else f"  (full move to {p['wanted_cm']:g} cm)")
+        out.append(f"    {p['name']:<20} {cm:>8}{extra}")
+        if p.get("why"):
+            out.append(f"        taken because: {p['why']}")
+        for line in p.get("move_explain") or []:
+            out.append(f"        planner: {line}")
+        out.append(f"        count {p['count']}: {boxes}")
+        for h in p.get("hints") or []:
+            out.append(f"        extra {h}")
+        if p.get("error"):
+            out.append(f"        camera: {p['error']}")
+        if p.get("file"):
+            out.append(f"        {p['file']}")
+    for line in decision.get("skipped") or []:
+        out.append(f"    {line}")
+    if decision.get("ranking"):
+        out.append("    ranking (highest confidence first):")
+        for i, (name, cm, iid, letter, conf) in enumerate(decision["ranking"], 1):
+            cm_t = "?" if cm is None else f"{float(cm):.0f}cm"
+            out.append(f"        {i}. {name:<14} {cm_t:>5}  ID {iid} {letter} {conf:.2f}"
+                       + ("  <- reported" if i == 1 else ""))
+    out.append("")
+    try:
+        os.makedirs(PHOTO_DIR, exist_ok=True)
+        with open(diagnosis_path(), "a", encoding="utf-8") as f:
+            if f.tell() == 0:
+                f.write(f"Trial {current_trial()}  {datetime.now():%Y-%m-%d %H:%M:%S}\n"
+                        f"RECOGNISED_CONF {CONF_THRESHOLD:.2f}  MODEL_MIN_CONF {MODEL_MIN_CONF:.2f}\n\n")
+            f.write("\n".join(out) + "\n")
+    except OSError as error:
+        print(f"    (could not write {diagnosis_path()}: {error})")
 
 
 def check_obstacle_side():
@@ -843,9 +942,10 @@ def print_plan_summary(reply, total_obstacles, trial):
     print(f"  Planning time      : {float(reply['planning_ms']):.0f} ms"
           f"   ({len(reply['commands'])} commands)")
     print(f"  Photos this run    : {os.path.abspath(PHOTO_DIR)}/")
-    print(f"                       Trial_{trial}_Obstacle_<id>_Snap<n>_<IDEAL|FAR|NEAR>.jpg")
+    print(f"                       Trial_{trial}_Obstacle_<id>_Snap<n>_Case<X>_<cm>cm[_short]_<IDEAL|FAR|NEAR>.jpg")
+    print(f"  Diagnosis log      : {os.path.abspath(diagnosis_path())}")
     print(f"  Photo rules        : A 1 image >= {CONF_THRESHOLD:.2f} done | B 1 image < {CONF_THRESHOLD:.2f}"
-          " FAR+NEAR vote | C none | D 2+ NEAR")
+          " IDEAL+FAR+NEAR, highest conf | C none | D 2+ IDEAL+NEAR, highest conf")
     print("-" * 64)
     where = "Start"
     for seg in reply.get("segments", []):
@@ -872,6 +972,16 @@ def print_run_summary(order, trial):
                   f"{d['conf']:.2f}) from {d['snap']}  ->  {d['file']}")
         else:
             print(f"  Obstacle {obstacle_id}: CASE {d['case']}  nothing reported - {d['reason']}")
+        if d is not None:
+            for p in d.get("photos") or []:
+                cm = "?" if p["sensor_cm"] is None else f"{float(p['sensor_cm']):.0f}cm"
+                print(f"      {p['name']:<20} {cm:>5}  count {p['count']}  "
+                      + (", ".join(f"ID {b[0]} {b[2]:.2f}" for b in p["boxes"]) or "-"))
+                for h in p.get("hints") or []:
+                    print(f"          {h}")
+            for line in d.get("skipped") or []:
+                print(f"      {line}")
+    print(f"  Diagnosis log: {os.path.abspath(diagnosis_path())}")
     print("=" * 64)
 
 
