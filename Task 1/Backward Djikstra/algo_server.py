@@ -1,5 +1,9 @@
 """
-Algo server. Runs on the laptop.
+Algo server (v5). Runs on the laptop.
+
+v5: every segment's "target" also carries "retry": the FAR (BW) and NEAR (FW)
+straight moves the RPi may make for extra photos, already cut short to keep
+MIN_CLEARANCE_CM. See planner.snap_retry_bounds().
 
 Protocol: one JSON object per line, UTF-8, newline terminated.
 
@@ -113,6 +117,30 @@ def serve_connection(conn, addr):
                           f"-> {len(response['commands'])} commands")
                     if response.get("skipped"):
                         print(f"[{addr}] skipped: {response['skipped']}")
+                    for seg in response.get("segments", []):
+                        t = seg["target"]
+                        r = t.get("retry", {})
+                        def show(b):
+                            if not b.get("available"):
+                                return "no room"
+                            cut = ""
+                            if b.get("short"):
+                                who = str(b.get("blocked_by") or "clearance").split(":")[0].split(" (")[0]
+                                cut = f" (wanted {b.get('wanted_sensor_to_face_cm', 0):g}, cut by {who})"
+                            return f"{b['command']} -> {b['sensor_to_face_cm']:.1f} cm{cut}"
+                        gp = t["goal_view_pose"]
+                        ang = t.get("angled", {})
+                        def show_ang(side):
+                            o = ang.get(side, {})
+                            if not o.get("available"):
+                                return f"{side} none"
+                            return f"{side} BW{o['start_back_cm']}+{o['turn']}"
+                        print(f"[{addr}]   obstacle {seg['obstacle_id']}: angled backup: "
+                              f"{show_ang('right')} | {show_ang('left')}")
+                        print(f"[{addr}]   obstacle {seg['obstacle_id']}: photo pose ({gp[0]:.1f}, {gp[1]:.1f}) "
+                              f"{gp[2]}, sensor->face {t['expected_sensor_to_face_cm']:.1f} cm "
+                              f"(pref {t.get('preferred_sensor_to_face_cm')}, penalty {t.get('view_penalty', 0):.1f}) | "
+                              f"FAR {show(r.get('far', {}))} | NEAR {show(r.get('near', {}))}")
                 else:
                     print(f"[{addr}] error: {response.get('message')}")
 
