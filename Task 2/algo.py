@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-task2_algo.py -- Unified Config & Restored Comments
+task2_algo.py -- Phase-Specific Edition
 =====================================================================
 NTU MDP -- Task 2 "Fastest Car" controller.
 
@@ -152,24 +152,17 @@ def drive_until_safe_then_finish_approach(ser, coarse_distance_cm, target_stando
         fail_run(f"{command} failed ({reply!r}).")
 
 
-def approach_obstacle_for_photo(ser, total_distance_cm):
-    """Drive from wherever the robot is now to PHOTO_STANDOFF_CM short of
+def approach_obstacle_for_photo(ser, total_distance_cm, photo_stop_cm):
+    """Drive from wherever the robot is now to photo_stop_cm short of
     the obstacle's face. This is the ONLY approach call for this leg --
     nothing after it re-closes any gap."""
-    coarse_cm = max(0, total_distance_cm - cfg.PHOTO_STANDOFF_CM - cfg.GENERAL_MARGIN_CM)
-    drive_until_safe_then_finish_approach(ser, coarse_cm, cfg.PHOTO_STANDOFF_CM)
+    coarse_cm = max(0, total_distance_cm - photo_stop_cm - cfg.GENERAL_MARGIN_CM)
+    drive_until_safe_then_finish_approach(ser, coarse_cm, photo_stop_cm)
 
 
 # =====================================================================
 # 5. OBSTACLE BYPASS -- two separate functions (fixes bug #3)
 # =====================================================================
-# Both start from wherever the robot is right now (the photo standoff). 
-# The "pass" leg's length covers: the remaining standoff gap, the
-# obstacle's own length, and a small exit margin.
-
-def _pass_distance_cm(obstacle_length_cm):
-    return cfg.PHOTO_STANDOFF_CM + obstacle_length_cm + cfg.CLEARANCE_MARGIN_CM
-
 
 def _check_ir_clear_after_stepout(ser, out_side):
     """
@@ -194,27 +187,27 @@ def _check_ir_clear_after_stepout(ser, out_side):
         drive_straight_cm(ser, cfg.GENERAL_MARGIN_CM)
 
 
-def bypass_obstacle_1(ser, side, obstacle_length_cm):
+def bypass_obstacle_1(ser, side):
     """
     Full lane-change around obstacle 1. Nets to ZERO heading change:
     turn, step out, turn, pass, turn, step back, turn -- ends facing
     forward again, ready to drive straight toward obstacle 2.
     """
     out_side, back_side = side, opposite(side)
-    pass_cm = _pass_distance_cm(obstacle_length_cm)
+    pass_cm = cfg.OBST1_PHOTO_STOP_CM + cfg.OBST1_WIDTH_CM + cfg.OBST1_DRIVE_PAST_CM
 
     turn(ser, 90, out_side)
-    drive_straight_cm(ser, cfg.LANE_SHIFT_CM)
+    drive_straight_cm(ser, cfg.OBST1_SIDE_SHIFT_CM)
     _check_ir_clear_after_stepout(ser, out_side)
 
     turn(ser, 90, back_side)
     drive_straight_cm(ser, pass_cm)
     turn(ser, 90, back_side)
-    drive_straight_cm(ser, cfg.LANE_SHIFT_CM)
+    drive_straight_cm(ser, cfg.OBST1_SIDE_SHIFT_CM)
     turn(ser, 90, out_side)       # <-- the turn obstacle 2's bypass omits
 
 
-def bypass_obstacle_2(ser, side, obstacle_length_cm):
+def bypass_obstacle_2(ser, side):
     """
     Same shape as bypass_obstacle_1, but WITHOUT the final turn. Nets to
     a 90-degree heading change instead of zero, so the robot is already 
@@ -222,17 +215,16 @@ def bypass_obstacle_2(ser, side, obstacle_length_cm):
     the carpark. Returns `back_side`.
     """
     out_side, back_side = side, opposite(side)
-    pass_cm = _pass_distance_cm(obstacle_length_cm)
+    pass_cm = cfg.OBST2_PHOTO_STOP_CM + cfg.OBST2_WIDTH_CM + cfg.OBST2_DRIVE_PAST_CM
 
     turn(ser, 90, out_side)
-    drive_straight_cm(ser, cfg.LANE_SHIFT_CM)
+    drive_straight_cm(ser, cfg.OBST2_SIDE_SHIFT_CM)
     _check_ir_clear_after_stepout(ser, out_side)
 
     turn(ser, 90, back_side)
     drive_straight_cm(ser, pass_cm)
     turn(ser, 90, back_side)
-    drive_straight_cm(ser, cfg.LANE_SHIFT_CM)
-    # NOTE: no final turn(ser, 90, out_side) here -- see docstring.
+    drive_straight_cm(ser, cfg.OBST2_SIDE_SHIFT_CM) 
     
     return back_side
 
@@ -246,7 +238,7 @@ def continue_curve_toward_carpark(ser, continuing_direction):
     After bypassing obstacle 2, move past it completely and then face 
     the carpark, so the next leg can be a straight drive back.
     """
-    drive_straight_cm(ser, cfg.CLEARANCE_MARGIN_CM)
+    drive_straight_cm(ser, cfg.FACE_CARPARK_DRIVE_CM)
     turn(ser, 90, continuing_direction)
 
 
@@ -256,14 +248,13 @@ def drive_back_to_carpark_standoff(ser, continuing_direction):
     step back into the center lane (X=0), and then complete the 
     approach to the carpark standoff.
     """
-    # 1. Drive straight back along offset lane. Added extra clearance margin 
-    # for Obs 1 so the tail doesn't clip it during the final turn back to center.
+    # 1. Drive straight back along offset lane.
     clearance_drive_cm = (
-        cfg.OBS2_LENGTH_CM 
-        + cfg.CLEARANCE_MARGIN_CM 
-        + cfg.OBS1_TO_OBS2_CM 
-        + cfg.OBS1_LENGTH_CM 
-        + cfg.CLEARANCE_MARGIN_CM 
+        cfg.OBST2_DRIVE_PAST_CM 
+        + cfg.OBST2_WIDTH_CM 
+        + cfg.OBST1_TO_OBST2_CM 
+        + cfg.OBST1_WIDTH_CM 
+        + cfg.RETURN_DRIVE_PAST_OBST1_CM 
     )
 
     print(f"    [RETURN] Driving {clearance_drive_cm:.0f} cm along offset lane to clear Obstacles.")
@@ -272,19 +263,19 @@ def drive_back_to_carpark_standoff(ser, continuing_direction):
     # 2. Step back to the center line (X=0)
     print("    [RETURN] Shifting back to center lane.")
     turn(ser, 90, continuing_direction)
-    drive_straight_cm(ser, cfg.LANE_SHIFT_CM) 
+    drive_straight_cm(ser, cfg.RETURN_SHIFT_TO_CENTER_CM) 
     turn(ser, 90, opposite(continuing_direction))
 
     # 3. Drive the rest of the way to the carpark standoff
     remaining_cm = (
-        cfg.CARPARK_TO_OBS1_CM 
-        - cfg.CLEARANCE_MARGIN_CM 
-        - cfg.CARPARK_CHECK_STANDOFF_CM
+        cfg.CARPARK_TO_OBST1_CM 
+        - cfg.RETURN_DRIVE_PAST_OBST1_CM 
+        - cfg.CARPARK_ALIGNMENT_STOP_CM
     )
     print(f"    [RETURN] Approaching carpark standoff ({remaining_cm:.0f} cm coarse drive).")
     
     coarse_cm = max(0, remaining_cm - cfg.GENERAL_MARGIN_CM)
-    drive_until_safe_then_finish_approach(ser, coarse_cm, cfg.CARPARK_CHECK_STANDOFF_CM)
+    drive_until_safe_then_finish_approach(ser, coarse_cm, cfg.CARPARK_ALIGNMENT_STOP_CM)
 
 
 # =====================================================================
@@ -317,8 +308,8 @@ def align_and_enter_carpark(ser):
     else:
         print(f"    [ALIGN] proceeding outside tolerance after {cfg.MAX_RETRIES} attempts.")
 
-    coarse_cm = max(0, cfg.CARPARK_CHECK_STANDOFF_CM - cfg.CARPARK_FINAL_STOP_CM - cfg.GENERAL_MARGIN_CM)
-    drive_until_safe_then_finish_approach(ser, coarse_cm, cfg.CARPARK_FINAL_STOP_CM)
+    coarse_cm = max(0, cfg.CARPARK_ALIGNMENT_STOP_CM - cfg.CARPARK_FINAL_PARK_CM - cfg.GENERAL_MARGIN_CM)
+    drive_until_safe_then_finish_approach(ser, coarse_cm, cfg.CARPARK_FINAL_PARK_CM)
     print("    [ALIGN] run complete.")
 
 
@@ -392,21 +383,22 @@ def run_task2(dry_run=False):
 
     try:
         print("\n[TASK2] Leg 1 -- approach obstacle 1's photo standoff.")
-        approach_obstacle_for_photo(ser, cfg.CARPARK_TO_OBS1_CM)
+        approach_obstacle_for_photo(ser, cfg.CARPARK_TO_OBST1_CM, cfg.OBST1_PHOTO_STOP_CM)
         obstacle1_side = read_arrow_direction("Obstacle 1")
         print(f"[TASK2] Obstacle 1 arrow: {obstacle1_side}")
 
         print("\n[TASK2] Leg 2 -- bypass obstacle 1 (ends facing forward).")
-        bypass_obstacle_1(ser, obstacle1_side, cfg.OBS1_LENGTH_CM)
+        bypass_obstacle_1(ser, obstacle1_side)
 
         print("\n[TASK2] Leg 3 -- approach obstacle 2's photo standoff.")
-        remaining_to_obstacle2_cm = cfg.OBS1_TO_OBS2_CM - cfg.CLEARANCE_MARGIN_CM
-        approach_obstacle_for_photo(ser, remaining_to_obstacle2_cm)
+        # Remaining distance is the empty gap minus what we already drove past Obs 1
+        remaining_to_obstacle2_cm = cfg.OBST1_TO_OBST2_CM - cfg.OBST1_DRIVE_PAST_CM
+        approach_obstacle_for_photo(ser, remaining_to_obstacle2_cm, cfg.OBST2_PHOTO_STOP_CM)
         obstacle2_side = read_arrow_direction("Obstacle 2")
         print(f"[TASK2] Obstacle 2 arrow: {obstacle2_side}")
 
         print("\n[TASK2] Leg 4 -- bypass obstacle 2 (continues curving, no final turn).")
-        continuing_direction = bypass_obstacle_2(ser, obstacle2_side, cfg.OBS2_LENGTH_CM)
+        continuing_direction = bypass_obstacle_2(ser, obstacle2_side)
 
         print("\n[TASK2] Leg 5 -- complete the curve to face the carpark.")
         continue_curve_toward_carpark(ser, continuing_direction)
