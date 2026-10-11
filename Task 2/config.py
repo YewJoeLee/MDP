@@ -38,7 +38,7 @@ CARPARK_FINAL_PARK_CM = 20       # Distance to creep inside the carpark
 GENERAL_MARGIN_CM = 10           # Buffer used for step-out corrections and back-offs
 MAX_RETRIES = 5                  # Auto-correction limits (alignment, IR clearing, US back-offs)
 FRONT_MIN_MM = 70                # Front US reading threshold to trigger a back-off
-SIDE_MIN_MM = 50                 # Side IR reading threshold to trigger a step-out correction
+SIDE_MIN_MM = 500                 # Side IR reading threshold to trigger a step-out correction
 ALIGN_TOLERANCE_MM = 15          # L/R disagreement above this = yawed, needs correction
 ALIGN_MAX_DEG = 15               # Cap on any single correction turn
 ALIGN_MULTIPLIER = 0.15          # Turn degrees per mm of IR disagreement (TUNE THIS)
