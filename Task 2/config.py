@@ -30,7 +30,7 @@ RETURN_DRIVE_PAST_OBST1_CM = 20  # Extra buffer to ensure tail clears Obs 1 on t
 # 4. ARRIVING AT CARPARK
 # =====================================================================
 CARPARK_ALIGNMENT_STOP_CM = 30   # Distance short of carpark to use IR sensors
-CARPARK_FINAL_PARK_CM = 10       # Distance to creep inside the carpark
+CARPARK_FINAL_PARK_CM = 20       # Distance to creep inside the carpark
 
 # =====================================================================
 # 5. CORRECTIONS, SAFETY & HARDWARE
