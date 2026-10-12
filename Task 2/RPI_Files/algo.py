@@ -54,8 +54,11 @@ def read_side_ir_mm(ser):
     if reply is None:
         fail_run("No reply to IR -- firmware patch not applied yet?")
     try:
-        left_token, right_token = reply.split()[1:3]
-        return int(left_token.split(":")[1]), int(right_token.split(":")[1])
+        tokens = reply.split()
+        # tokens[2] is "mm:450" (IR1), tokens[5] is "mm:460" (IR2)
+        left_mm = int(tokens[2].split(":")[1])
+        right_mm = int(tokens[5].split(":")[1])
+        return left_mm, right_mm
     except Exception:
         fail_run(f"Could not parse IR reply: {reply!r}")
 
