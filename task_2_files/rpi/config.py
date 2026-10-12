@@ -156,16 +156,22 @@ STREAM_FLUSH_S = 30.0      # end of run: time allowed to deliver / re-send the r
 # The turn models above (TURN45_MODELS, SMALL_TURN_MODELS) drive every Task 2
 # move - measure LT45 / RT45 / RT10 / LT10 (10 runs each) before trusting a run.
 # ---------------------------------------------------------------------------
+# Task 2 body clearance limits (cm); preferred clearance is used when feasible.
+T2_MIN_CLEARANCE_CM = 5.0
+T2_CARPARK_CLEARANCE_CM = 5.0
+T2_TARGET_CLEARANCE_CM = 10.0
 T2_AC_OBS1_CM = 40.0             # ultrasonic -> obstacle 1 face when reading arrow 1
 T2_IR_GAP_OBS1_CM = 10.0         # target side-IR reading while passing obstacle 1
 # Robot centre at the start -> carpark front plane. From the rules (inside depth 50 cm):
 # start with the robot's REAR against the back wall -> 50 - ROBOT_LENGTH_CM/2 = 38.
 # Set a few cm LOW on purpose: underestimating by up to 20 cm is safe (the ultrasonic
 # corrects it), overestimating by 20 cm is not.
-T2_CP_FRONT_FROM_START_CM = 50.0 - ROBOT_LENGTH_CM / 2 - 5.0   # = 33
-T2_IR_FWD_CM = 0.0               # MEASURE: side IRs' forward offset from robot centre (+ = ahead)
-T2_IR_INSET_CM = 0.0             # MEASURE: how far each IR's face sits inside the robot's side
-T2_IR_LAG_CM = 0.0               # MEASURE: how far past an edge the IR "spike" registers
+T2_CARPARK_HALF_CM = 20.0        # half the carpark's INSIDE width (40 cm inside, arms 10 cm each)
+T2_CARPARK_DEPTH_CM = 50.0       # carpark inside depth MINIMUM; the real one is measured when parking
+T2_CP_FRONT_FROM_START_CM = T2_CARPARK_DEPTH_CM - ROBOT_LENGTH_CM / 2 - 5.0   # = 33
+T2_IR_FWD_CM = 4.5               # MEASURE: side IRs' forward offset from robot centre (+ = ahead)
+T2_IR_INSET_CM = 1.5            # MEASURE: how far each IR's face sits inside the robot's side
+T2_IR_LAG_CM = 3.0               # MEASURE: how far past an edge the IR "spike" registers
 T2_U2_FAR_END_CM = 18.5          # obstacle 2 far end assumed when the ultrasonic missed it (short)
 T2_AC_STOP_CARPARK_CM = 70.0     # stop distance in front of the carpark arm before turning in
 T2_CARPARK_ARM_CM = 10.0         # MEASURE: thickness of the carpark arm's front edge

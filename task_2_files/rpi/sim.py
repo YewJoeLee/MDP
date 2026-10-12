@@ -3,6 +3,7 @@ import config as C
 import task2 as T
 
 W, Lr, a = C.ROBOT_WIDTH_CM, C.ROBOT_LENGTH_CM, C.SENSOR_FORWARD_CM
+CPH, CPD, ARM = C.T2_CARPARK_HALF_CM, C.T2_CARPARK_DEPTH_CM, C.T2_CARPARK_ARM_CM   # carpark inside half-width, depth, arm
 
 def ray_box(ox, oy, dx, dy, box):
     x0, x1, y0, y1 = box
@@ -18,13 +19,18 @@ def ray_box(ox, oy, dx, dy, box):
     return tmin if tmin >= 0 else None
 
 class World:
+    # test the photo fallback: "ok" | "angled" (straight photos weak, 10-deg ones fine)
+    # | "low" (every photo weak) | "none" (no arrow in any photo)
+    photos = "ok"
+    body_edge = True    # False = like the real Camera.snap(), which never fills body_edge_px
+
     def __init__(self, G1, G2, L, a1, a2, wall=50, ir_fwd=0.0, s=0.0, noise=0.0, beam=7.5):
         self.ir_fwd, self.s, self.noise, self.beam = ir_fwd, s, noise, beam
         self.a1, self.a2 = a1, a2
         self.boxes = {}
-        self.boxes["arm_up"] = (-60, 0, 30, 40)
-        self.boxes["arm_dn"] = (-60, 0, -40, -30)
-        self.boxes["back"] = (-60, -50, -40, 40)
+        self.boxes["arm_up"] = (-CPD - ARM, 0, CPH, CPH + ARM)
+        self.boxes["arm_dn"] = (-CPD - ARM, 0, -CPH - ARM, -CPH)
+        self.boxes["back"] = (-CPD - ARM, -CPD, -CPH - ARM, CPH + ARM)
         self.boxes["obs1"] = (G1, G1 + 10, -5, 5)
         x2 = G1 + 10 + G2
         self.x2, self.L = x2, L
@@ -32,7 +38,7 @@ class World:
         if wall:
             self.boxes["wall_up"] = (0, x2 + 200, L / 2 + wall, L / 2 + wall + 5)
             self.boxes["wall_dn"] = (0, x2 + 200, -L / 2 - wall - 5, -L / 2 - wall)
-        self.p = T._Pose(0.0); self.p.x = -50 + 12 + 6   # rear 6 cm off the back wall
+        self.p = T._Pose(0.0); self.p.x = -CPD + 12 + 6   # rear 6 cm off the back wall
         self.stack = []
         self.minclear = (1e9, None, None)
         self.cmds = []
@@ -138,11 +144,14 @@ class World:
                 if t is not None and t < 1: continue
             if best is None or dist < best[0]:
                 best = (dist, lab, brg, name)
-        if best is None: return None
+        if best is None or self.photos == "none": return None
         dist, lab, brg, name = best
         box_cx = img_w / 2 - fx * math.tan(math.radians(brg))
         res = {"label": lab, "conf": 0.9 if dist < 150 else 0.4, "box_cx": box_cx, "img_w": img_w}
-        if name == "obs2":
+        straight = abs((p.h + 180) % 360 - 180) < 3
+        if self.photos == "low" or (self.photos == "angled" and straight):
+            res["conf"] = 0.3                       # seen, but below RECOGNISED_CONF
+        if name == "obs2" and self.body_edge:
             side = 1 if cy > 0 else -1
             pts = [(self.x2, side * self.L / 2), (self.x2 + 10, side * self.L / 2)]
             brs = [math.degrees(math.atan2(py - cy, px - cx)) - p.h for px, py in pts]
@@ -154,9 +163,9 @@ class World:
 def run(G1, G2, L, a1, a2, wall=50, noise=0.0, verbose=False, ie=True):
     w = World(G1, G2, L, a1, a2, wall=wall, noise=noise)
     out = T.run_task2(w.send, w.read_us, w.read_ir_left, w.read_ir_right, w.snap,
-                      cp_front_from_start=32.0, drive_edge=w.drive_edge if ie else None)
+                      cp_front_from_start=CPD - 18, drive_edge=w.drive_edge if ie else None)
     p = w.p
-    inside = (p.x + 12 <= 0 and p.x - 12 >= -50 and abs(p.y) + 9.5 <= 30)
+    inside = (p.x + 12 <= 0 and p.x - 12 >= -CPD and abs(p.y) + 9.5 <= CPH)
     return out, w, inside
 
 if __name__ == "__main__":

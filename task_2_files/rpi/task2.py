@@ -28,7 +28,28 @@ import config as C
 
 FOV_H_DEG = 62.2            # Pi Camera v2 horizontal field of view
 SIN45 = math.sqrt(0.5)
-PLAN_MARGIN_CM = 3.0        # extra gap on top of MIN_CLEARANCE_CM in every planned path
+PLAN_MARGIN_CM = 3.0        # extra gap on top of CLEAR_CM in every planned path
+# Task 2 settings and the values they should have. Any that an older config.py lacks are
+# filled in here, so the run still works (rpi_client_task2.py lists them as a warning).
+T2_DEFAULTS = {
+    "T2_AC_OBS1_CM": 40.0, "T2_IR_GAP_OBS1_CM": 12.0, "T2_MIN_CLEARANCE_CM": 5.0,
+    "T2_CARPARK_CLEARANCE_CM": 5.0, "T2_TARGET_CLEARANCE_CM": 10.0, "T2_PHOTO_TURNS_MAX": 2,
+    "T2_DEFAULT_ARROW_1": "LEFT", "T2_CARPARK_HALF_CM": 20.0, "T2_CARPARK_DEPTH_CM": 50.0,
+    "T2_CP_FRONT_FROM_START_CM": 33.0, "T2_IR_FWD_CM": 0.0, "T2_IR_INSET_CM": 0.0,
+    "T2_IR_LAG_CM": 0.0, "T2_U2_FAR_END_CM": 18.5, "T2_AC_STOP_CARPARK_CM": 70.0,
+    "T2_CARPARK_ARM_CM": 10.0,
+}
+T2_MISSING = [k for k in T2_DEFAULTS if not hasattr(C, k)]
+for _k in T2_MISSING:
+    setattr(C, _k, T2_DEFAULTS[_k])
+
+CLEAR_CM = getattr(C, "T2_MIN_CLEARANCE_CM", C.MIN_CLEARANCE_CM)          # obstacles, walls
+CARPARK_CLEAR_CM = getattr(C, "T2_CARPARK_CLEARANCE_CM", C.MIN_CLEARANCE_CM)  # carpark arms / back
+# Every plan first tries to keep TARGET_CLEAR_CM; only if none can, CLEAR_CM + PLAN_MARGIN_CM.
+# Optional moves (10-deg photo / ultrasonic turns) need TARGET_CLEAR_CM or are skipped.
+TARGET_CLEAR_CM = max(getattr(C, "T2_TARGET_CLEARANCE_CM", 0.0), CLEAR_CM + PLAN_MARGIN_CM)
+NEEDS = (TARGET_CLEAR_CM, CLEAR_CM + PLAN_MARGIN_CM)      # preferred, then minimum
+PHOTO_CLEAR_CM = TARGET_CLEAR_CM
                             # (turn arcs are only sampled at start / middle / end)
 
 
@@ -113,6 +134,29 @@ def _turn_model(cmd, m=1):
     return (f, r, dg) if m == 1 else (f, -r, -dg)
 
 
+def _undo_turn(pose, cmd, m=1):
+    """Pose after X<cmd> retraces the arc of <cmd> (XR10 after RT10, XL10 after LT10)."""
+    f, r, dg = _turn_model(cmd, m)
+    pose.h += dg
+    hr = math.radians(pose.h)
+    pose.x -= f * math.cos(hr) + r * math.sin(hr)
+    pose.y -= f * math.sin(hr) - r * math.cos(hr)
+
+
+def _recognised(photos):
+    return any(p is not None and p["conf"] >= C.RECOGNISED_CONF for p in photos)
+
+
+def _pick_arrow(photos, default):
+    """Best of the photos -> (arrow, conf, how). how: "seen" (>= RECOGNISED_CONF),
+    "guess" (best low-confidence box) or "default" (no arrow in any photo)."""
+    got = [p for p in photos if p is not None]
+    if not got:
+        return default, None, "default"
+    b = max(got, key=lambda p: p["conf"])
+    return b["label"], b["conf"], ("seen" if b["conf"] >= C.RECOGNISED_CONF else "guess")
+
+
 def _path_points(start, seq, m=1):
     """Poses along a planned sequence (turn names / straight cm). Turns are sampled at
     start, midpoint and end; straights every ~2 cm."""
@@ -127,6 +171,12 @@ def _path_points(start, seq, m=1):
             for _ in range(n):
                 p.move(it / n); pts.append(p.copy())
     return pts
+
+
+def _path_room(start, seq, box, m=1):
+    """Smallest gap (cm) between the robot and box along a planned sequence."""
+    return min(_box_clear(q, box, C.ROBOT_WIDTH_CM, C.ROBOT_LENGTH_CM)
+               for q in _path_points(start, seq, m))
 
 
 def _plan_s_curve(start, target_y, m=1):
@@ -160,7 +210,7 @@ def _plan_s_curve(start, target_y, m=1):
 # =============================================================================
 
 def start_to_obs1(send, read_us, snap, ac=40.0, us_max=200.0, max_drive_cm=200.0,
-                  step_cm=10):
+                  step_cm=10, default_arrow=getattr(C, "T2_DEFAULT_ARROW_1", "LEFT")):
     """
     Task 2, Step 0 - drive straight out of the carpark to AC<ac> in front of
     obstacle 1 and read its arrow.
@@ -173,6 +223,9 @@ def start_to_obs1(send, read_us, snap, ac=40.0, us_max=200.0, max_drive_cm=200.0
         drives to `ac`, re-reads once to fine-tune, then snaps. If confidence is low it
         takes one 10-deg angled photo each side (RT10/XR10, LT10/XL10) and keeps the best.
         If the ultrasonic sees nothing it creeps forward in step_cm steps until it does.
+        Photo turns: at most T2_PHOTO_TURNS_MAX (RT10 then LT10), only while the arrow is
+        not recognised, each undone. Not recognised at all -> continue with the best
+        low-confidence photo, or default_arrow if no photo had an arrow.
 
     INPUTS
         send(cmd)    : sends one STM command and BLOCKS until done.
@@ -184,9 +237,11 @@ def start_to_obs1(send, read_us, snap, ac=40.0, us_max=200.0, max_drive_cm=200.0
         step_cm      : creep step while the ultrasonic sees nothing (cm).
 
     OUTPUT (dict)
-        status : "OK" | "NO_ARROW" | "NO_OBSTACLE".
-        arrow  : "LEFT"/"RIGHT" (None if not recognised).
-        conf   : its confidence.
+        status : "OK" | "NO_OBSTACLE".
+        arrow  : "LEFT"/"RIGHT" - always set (see arrow_how).
+        conf   : its confidence (None if no photo had an arrow).
+        arrow_how : "seen" | "guess" (below RECOGNISED_CONF) | "default".
+        us_ac  : ultrasonic at the AC stop (cm).
         D1     : robot-centre travel from the start to the AC stop (cm) - needed later
                  to find the carpark again.
         log    : commands sent.
@@ -208,33 +263,47 @@ def start_to_obs1(send, read_us, snap, ac=40.0, us_max=200.0, max_drive_cm=200.0
         drive(step_cm)
         u = _us_median(read_us, lo=5, hi=us_max)
     if u is None:
-        return {"status": "NO_OBSTACLE", "arrow": None, "conf": None, "D1": D1, "log": log}
+        return {"status": "NO_OBSTACLE", "arrow": None, "conf": None, "arrow_how": None,
+                "us_ac": None, "D1": D1, "log": log}
     drive(u - ac)
     u = _us_median(read_us, lo=5, hi=us_max)
     if u is not None and abs(u - ac) >= 1:
         drive(max(-10, min(10, u - ac)))
 
-    best = snap()
+    log.append(f"US at the AC stop: {'-' if u is None else format(u, '.1f')} cm")
+
+    # Arrow: straight photo, then while not recognised at most T2_PHOTO_TURNS_MAX 10-deg
+    # photos (RT, then LT), each checked against the face first and undone with XR / XL,
+    # which retraces the arc back to the AC pose.
     deg = C.ANGLE_TURN_DEG
-    for t in ("RT", "LT"):
-        if best is not None and best["conf"] >= C.RECOGNISED_CONF:
+    face = C.SENSOR_FORWARD_CM + (u if u is not None else ac)
+    face_box = (face, face + 10.0, -1e4, 1e4)             # the face as a wall: worst case
+    photos = [snap()]
+    for t in ("RT", "LT")[:C.T2_PHOTO_TURNS_MAX]:
+        if _recognised(photos):
             break
-        send(f"{t}{deg}"); log.append(f"{t}{deg}")
-        res = snap()
+        name = f"{t}{deg}"
+        room = _path_room(_Pose(0.0), [name], face_box)
+        if room < PHOTO_CLEAR_CM:
+            log.append(f"no room for the {name} photo ({room:.1f} cm to obstacle 1) - skipped")
+            continue
+        send(name); log.append(name)
+        photos.append(snap())
         undo = "X" + t[0] + str(deg)
         send(undo); log.append(undo)
-        if res and (best is None or res["conf"] > best["conf"]):
-            best = res
-    ok = best is not None and best["conf"] >= C.RECOGNISED_CONF
-    return {"status": "OK" if ok else "NO_ARROW", "arrow": best["label"] if ok else None,
-            "conf": best["conf"] if best else None, "D1": round(D1, 1), "log": log}
+    arrow, conf, how = _pick_arrow(photos, default_arrow)
+    if how != "seen":
+        log.append(f"arrow 1 not recognised - continuing with {arrow} "
+                   f"({'best low-confidence photo' if how == 'guess' else 'default'})")
+    return {"status": "OK", "arrow": arrow, "conf": conf, "arrow_how": how,
+            "us_ac": u, "D1": round(D1, 1), "log": log}
 
 
 # =============================================================================
 # Step 1 - dodge obstacle 1
 # =============================================================================
 
-def dodge_plan(arrow, g=10.0, s=0.0, h=5.0, ac=40.0, min_clear=C.MIN_CLEARANCE_CM):
+def dodge_plan(arrow, g=10.0, s=0.0, h=5.0, ac=40.0, min_clear=CLEAR_CM):
     """
     Task 2, Step 1 - dodge OBSTACLE 1 after reading its arrow.
 
@@ -414,6 +483,10 @@ def approach_and_snap_obs2(send, read_us, snap, Y0, x_end_cm, dodge_side="LEFT",
             5. turn 10 deg back (LT10) so the robot is straight for the 45-deg exit.
         In both cases the robot's position is tracked through every move, and
         the sideways offset is cross-checked against the photo.
+        Arrow not recognised: 10-deg photo turns toward the centre line, at most
+        T2_PHOTO_TURNS_MAX from straight (U2's search angle counts), each checked
+        against the face (backing up if needed) and undone. Still not recognised ->
+        continue with the best low-confidence photo, or the dodge side.
 
     WHEN TO CALL
         After pass_obs1_measure_ir(). The robot is stopped and straight.
@@ -446,14 +519,14 @@ def approach_and_snap_obs2(send, read_us, snap, Y0, x_end_cm, dodge_side="LEFT",
         read_heading()   : optional gyro heading vs the run's start heading (deg, + = left).
                            Warns if large; also syncs the tracked heading after every turn.
         Reads from config.py: SENSOR_FORWARD_CM, ROBOT_WIDTH_CM, ROBOT_LENGTH_CM,
-        MIN_CLEARANCE_CM, MAX_STRAIGHT_COMMAND_CM, RECOGNISED_CONF, ANGLE_TURN_DEG,
+        T2_MIN_CLEARANCE_CM, MAX_STRAIGHT_COMMAND_CM, RECOGNISED_CONF, ANGLE_TURN_DEG,
         SMALL_TURN_MODELS (RT10 / LT10).
 
     OUTPUT (dict)
-        status      : "OK" | "NO_ARROW" (no image >= RECOGNISED_CONF)
-                      | "NO_DISTANCE" (arrow may be known, but face distance unknown).
+        status      : "OK" | "NO_DISTANCE" (face distance unknown).
         case        : "U1" | "U2".
-        arrow, conf : recognised arrow and confidence (None if not recognised).
+        arrow, conf : arrow and its confidence - arrow always set (see arrow_how).
+        arrow_how   : "seen" | "guess" (below RECOGNISED_CONF) | "default" (= dodge_side).
         d_front     : ultrasonic -> obstacle 2 face distance, robot STRAIGHT (cm).
                       In U2 this can be well under target_front - that is fine, U2 means
                       obstacle 2 is short so the exit needs little room.
@@ -508,43 +581,76 @@ def approach_and_snap_obs2(send, read_us, snap, Y0, x_end_cm, dodge_side="LEFT",
         r = _us_median(read_us, lo=lo, hi=us_max)
         return None if r is None else pose.x + (a + r) * cos_h()
 
-    def cam_pos():
-        hr = math.radians(pose.h)
-        return (pose.x + cam_fwd * math.cos(hr) - cam_lat * math.sin(hr),
-                pose.y + cam_fwd * math.sin(hr) + cam_lat * math.cos(hr))
+    def cam_pos(p=None):
+        p = p or pose
+        hr = math.radians(p.h)
+        return (p.x + cam_fwd * math.cos(hr) - cam_lat * math.sin(hr),
+                p.y + cam_fwd * math.sin(hr) + cam_lat * math.cos(hr))
 
-    def cam_face(res):
-        """Face x from the arrow's angle (arrow sits on the centre line, y = 0)."""
-        xc, yc = cam_pos()
-        phi = math.radians(pose.h + bearing_deg(res["box_cx"], res["img_w"]))
+    def cam_face(res, p=None):
+        """Face x from the arrow's angle (arrow sits on the centre line, y = 0),
+        p = the pose the photo was taken from."""
+        p = p or pose
+        xc, yc = cam_pos(p)
+        phi = math.radians(p.h + bearing_deg(res["box_cx"], res["img_w"]))
         if abs(math.degrees(phi)) < 0.5 or yc * math.tan(phi) >= 0:
             return None                                  # on-axis or wrong side
         xf = xc - yc / math.tan(phi)
-        return xf if xf > front_x() else None
+        return xf if xf > p.x + a * math.cos(math.radians(p.h)) else None
 
     def drive_to_target():
         dx = (x_face - target_front) - front_x()
         if abs(dx) >= 1:
             drive(dx / cos_h())
 
-    def snap_with_fallback():
-        first = snap()
-        best = first
-        if best is None or best["conf"] < C.RECOGNISED_CONF:
-            saved = pose.copy()
-            send(f"{toward}{deg}"); log.append(f"{toward}{deg}")
-            angled = snap()
-            undo = ("XR" if toward == "RT" else "XL") + str(deg)
-            send(undo); log.append(undo)
-            pose.x, pose.y, pose.h = saved.x, saved.y, saved.h   # undo retraces the arc
-            if angled and (best is None or angled["conf"] > best["conf"]):
-                best = angled
-        return first, best
+    obs1_box = (ac_obs1 + a - x_end_cm, ac_obs1 + a + 10 - x_end_cm, -5.0, 5.0)
 
-    def correct_y(res):
-        """Ultrasonic gives distance, photo gives angle -> true sideways position."""
-        xc, yc = cam_pos()
-        phi = pose.h + bearing_deg(res["box_cx"], res["img_w"])
+    def room_for(name):
+        """Make sure the 10-deg photo turn `name` keeps clear of obstacle 2's face (the
+        ultrasonic one if known, else the closest the rules allow), backing up first if
+        it does not. False = no safe way -> skip the photo."""
+        need = PHOTO_CLEAR_CM
+        fx = x_face if x_face is not None else x_face_min
+        face_box = (fx, fx + 10.0, -1e4, 1e4)
+        if _path_room(pose, [name], obs1_box) < need:   # the turn swings the rear out
+            log.append(f"no room for the {name} photo - the rear would swing near obstacle 1")
+            return False
+        room = _path_room(pose, [name], face_box)
+        if room >= need:
+            return True
+        back = int(math.ceil(need - room)) + 1
+        if _path_room(pose, [-back], obs1_box) < need:
+            log.append(f"no room for the {name} photo and backing up would near obstacle 1 - skipped")
+            return False
+        log.append(f"backing up {back} cm for the {name} photo ({room:.1f} cm to the face)")
+        drive(-back)
+        return _path_room(pose, [name], face_box) >= need
+
+    def snap_with_fallback():
+        """Photo here, then while the arrow is not recognised 10-deg photo turns toward the
+        centre line, at most T2_PHOTO_TURNS_MAX from straight in all (the U2 search angle
+        counts). All undone with XR / XL (retraces each arc). Returns the first photo, the
+        pose it was taken from, and every photo."""
+        first, first_pose = snap(), pose.copy()
+        photos, done = [first], []
+        name = f"{toward}{deg}"
+        undo = ("XR" if toward == "RT" else "XL") + str(deg)
+        while (not _recognised(photos)
+               and round(abs(pose.h) / deg) < C.T2_PHOTO_TURNS_MAX and room_for(name)):
+            turn(name); done.append(name)
+            photos.append(snap())
+        for nm in reversed(done):
+            send(undo); log.append(undo)
+            _undo_turn(pose, nm)
+            if read_heading is not None:
+                pose.h = read_heading()
+        return first, first_pose, photos
+
+    def correct_y(res, p):
+        """Ultrasonic gives distance, photo (taken at pose p) gives angle -> true sideways
+        position. The error found at p is applied to the current pose."""
+        xc, yc = cam_pos(p)
+        phi = p.h + bearing_deg(res["box_cx"], res["img_w"])
         phi_exp = math.degrees(math.atan2(-yc, x_face - xc))
         if abs(phi - phi_exp) > bearing_tol_deg:
             yc_true = -(x_face - xc) * math.tan(math.radians(phi))
@@ -571,14 +677,14 @@ def approach_and_snap_obs2(send, read_us, snap, Y0, x_end_cm, dodge_side="LEFT",
             x_face = xf
             if abs((x_face - target_front) - front_x()) >= 1:
                 drive(max(-10, min(10, (x_face - target_front) - front_x())))
-        first, best = snap_with_fallback()
+        first, first_pose, photos = snap_with_fallback()
 
     else:                                                 # ========== U2 ==========
         case = "U2"
         log.append("U2: no echo - clear obs1, angle in, search")
 
         # 1. Rear clears obstacle 1 (+ clearance) before turning toward it.
-        rear_clear = (ac_obs1 + a + 10 + C.MIN_CLEARANCE_CM + Lr / 2) - x_end_cm
+        rear_clear = (ac_obs1 + a + 10 + CLEAR_CM + PLAN_MARGIN_CM + Lr / 2) - x_end_cm
         room = worst_gap() - min_front_cm
         angled_in = rear_clear <= room
         if rear_clear > 0:
@@ -614,15 +720,15 @@ def approach_and_snap_obs2(send, read_us, snap, Y0, x_end_cm, dodge_side="LEFT",
             drive(search_step)
 
         # 4. Snap from the (angled) pose.
-        first, best = snap_with_fallback()
+        first, first_pose, photos = snap_with_fallback()
         if x_face is None and first is not None:
-            xf = cam_face(first)
+            xf = cam_face(first, first_pose)
             if xf is not None:
                 x_face, face_source = xf, "CAM"
 
     # ---------------- Y cross-check (only when distance came from ultrasonic) ----------
     if face_source == "US" and first is not None:
-        correct_y(first)
+        correct_y(first, first_pose)
 
     # ---------------- U2: straighten back ----------------
     if abs(pose.h) > 0.5:
@@ -634,12 +740,12 @@ def approach_and_snap_obs2(send, read_us, snap, Y0, x_end_cm, dodge_side="LEFT",
             log.append(f"WARN heading off by {err:.1f} deg before exit")
 
     d_front = None if x_face is None else round(x_face - (pose.x + a), 1)
-    recognised = best is not None and best["conf"] >= C.RECOGNISED_CONF
-    status = "OK" if recognised and d_front is not None else \
-             "NO_ARROW" if not recognised else "NO_DISTANCE"
-    return {"status": status, "case": case,
-            "arrow": best["label"] if recognised else None,
-            "conf": best["conf"] if best else None,
+    arrow, conf, how = _pick_arrow(photos, dodge_side)
+    if how != "seen":
+        log.append(f"arrow 2 not recognised - continuing with {arrow} "
+                   f"({'best low-confidence photo' if how == 'guess' else 'default: the dodge side'})")
+    status = "OK" if d_front is not None else "NO_DISTANCE"
+    return {"status": status, "case": case, "arrow": arrow, "conf": conf, "arrow_how": how,
             "d_front": d_front, "Y": round(side * pose.y, 1),
             "face_source": face_source,
             "x_face": None if x_face is None else round(x_face, 1),
@@ -755,7 +861,7 @@ def loop_obs2(send, read_us, read_ir, arrow2, Y, d_front, dodge_side="LEFT",
                         command (the STM stops at the edge and checks the wall itself)
                         instead of FW<step_cm> + IR + ultrasonic repeated.
         Reads from config.py: TURN45_MODELS, SENSOR_FORWARD_CM, ROBOT_WIDTH_CM,
-        ROBOT_LENGTH_CM, MIN_CLEARANCE_CM, MAX_STRAIGHT_COMMAND_CM.
+        ROBOT_LENGTH_CM, T2_MIN_CLEARANCE_CM, MAX_STRAIGHT_COMMAND_CM.
 
     OUTPUT (dict)
         status      : "OK" | "ABORT_UNSAFE" (plan fails clearance - nothing executed)
@@ -778,7 +884,7 @@ def loop_obs2(send, read_us, read_ir, arrow2, Y, d_front, dodge_side="LEFT",
         at their start, midpoint and end (re-check with your planner's polygon checker).
     """
     W, Lr, a = C.ROBOT_WIDTH_CM, C.ROBOT_LENGTH_CM, C.SENSOR_FORWARD_CM
-    clear, depth = C.MIN_CLEARANCE_CM, 10.0
+    clear, depth = CLEAR_CM, 10.0
     m = 1 if arrow2 == "LEFT" else -1                 # work as if always rounding the +y end
     OUT, IN = ("LT45", "RT45") if m == 1 else ("RT45", "LT45")
     pose = _Pose(m * (Y if dodge_side == "LEFT" else -Y))
@@ -786,6 +892,7 @@ def loop_obs2(send, read_us, read_ir, arrow2, Y, d_front, dodge_side="LEFT",
     lane_off = wall_gap / 2                           # middle of [clear+W/2, wall-clear-W/2]
     log, play = [], None
     far = near = None
+    far_bound = False                                 # far is only an upper bound so far
     shift = 0.0
 
     # ---------------- helpers ----------------
@@ -875,17 +982,17 @@ def loop_obs2(send, read_us, read_ir, arrow2, Y, d_front, dodge_side="LEFT",
         d = max(0, round((far + lane_off - y0) / SIN45))
         obs1_box = (-obs1_gap - 10.0, -obs1_gap, -5.0, 5.0)
 
-        def plan_ok(seq):
+        def plan_ok(seq, need):
             end = sim(seq)
             if not far + clear + W / 2 <= end.y <= far + wall_gap - clear - W / 2:
                 return False
-            return all(clearance(p, far) >= clear + PLAN_MARGIN_CM and
-                       _box_clear(p, obs1_box, W, Lr) >= clear + PLAN_MARGIN_CM and
-                       max(cy for _, cy in corners(p)) <= far + wall_gap - clear
+            return all(clearance(p, far) >= need and
+                       _box_clear(p, obs1_box, W, Lr) >= need and
+                       max(cy for _, cy in corners(p)) <= far + wall_gap - need
                        for p in _path_points(pose, seq, m))
 
-        pre = next((b for b in range(0, -62, -2)
-                    if plan_ok(([b] if b else []) + [OUT, d, IN])), None)
+        pre = next((b for need in NEEDS for b in range(0, -62, -2)
+                    if plan_ok(([b] if b else []) + [OUT, d, IN], need)), None)
         if pre is None:
             log.append("A: no safe S-curve even after backing up - not executed")
             return result("ABORT_UNSAFE")
@@ -897,15 +1004,45 @@ def loop_obs2(send, read_us, read_ir, arrow2, Y, d_front, dodge_side="LEFT",
 
     else:
         play = "B"
-        dx_turns = sim([OUT, OUT]).x - pose.x
-        x0 = -gap_target - W / 2 - dx_turns            # centre x before the two OUT45s
+        # Get parallel to the face. Robot on the arrow's side: OUT45 + reverse 45 (XR45 for
+        # a LEFT arrow) ends ~9 cm CLOSER to the centre line, so the IR starts beside even
+        # the shortest obstacle and the robot stays far from a wall. Its side gap is the
+        # smallest that keeps the turns clear of a face of any length. Robot on the other
+        # side (or the reverse turn would swing the rear near obstacle 1): OUT45 + OUT45,
+        # which carries it ~30 cm out, across the centre line.
+        obs1_box = (-obs1_gap - 10.0, -obs1_gap, -5.0, 5.0)
+        face_box = (0.0, depth, -1e4, 1e4)
+        need = clear + PLAN_MARGIN_CM
+        entry = None
+        BACK = "XR45" if m == 1 else "XL45"
+        dx_e = sim([OUT, BACK]).x - pose.x
+        # gaps to (obstacle 2's face, obstacle 1): both the target if possible, else the
+        # minimum - still far safer than OUT45 + OUT45, which can end next to a wall
+        for n_face, n_obs1 in ([(f, o) for f in NEEDS for o in NEEDS]
+                               if same_side and BACK in C.TURN45_MODELS else ()):
+            for g_e in range(int(gap_target), int(ir_near_max) - 4):    # IR reads <= 35
+                x0 = -g_e - W / 2 - dx_e
+                p0 = pose.copy(); p0.x = x0
+                if _path_room(p0, [OUT, BACK], face_box, m) >= n_face:
+                    if _path_room(pose, [x0 - pose.x, OUT, BACK], obs1_box, m) >= n_obs1:
+                        entry = [OUT, BACK]
+                    break
+            if entry:
+                break
+        if entry is None:
+            entry = [OUT, OUT]
+            x0 = -gap_target - W / 2 - (sim([OUT, OUT]).x - pose.x)
+        log.append(f"B: parallel to the face with {' + '.join(entry)}")
         drive(x0 - pose.x)
         u = _us_median(read_us, lo=5, hi=150)          # re-zero x on the face, then fine-tune
-        if u is not None:
+        if u is not None and abs((-u - a) - pose.x) > 5:   # beam missed the face (short obstacle,
+            log.append(f"B: ultrasonic {u:.1f} ignored (expected ~{-pose.x - a:.1f})")  # robot off its end)
+        elif u is not None:
             pose.x = -u - a
             if abs(x0 - pose.x) >= 1:
                 drive(x0 - pose.x)
-        turn(OUT); turn(OUT)                           # parallel to the face
+        for c in entry:                                # parallel to the face
+            turn(c)
 
         res, p_sp, nears = drive_until_spike(need_seen=False)
         if nears:                                      # face is at x = 0
@@ -915,11 +1052,15 @@ def loop_obs2(send, read_us, read_ir, arrow2, Y, d_front, dodge_side="LEFT",
             target = far + lane_off
             log.append(f"B: far end measured {far:.1f}")
         elif res == "NEVER_SAW":                       # already past the end
-            far_hi, far_lo = ir_pos(pose)[1], play_a_max
+            # lower bound: play_a_max only if a far end estimate existed (a short obstacle
+            # would have been PLAY A), else the rules' shortest obstacle (30 cm -> 15)
+            far_hi = ir_pos(pose)[1]
+            far_lo = min(far_hi, play_a_max if far_end_est is not None else 15.0)
             lo, hi = far_hi + clear + W / 2, far_lo + wall_gap - clear - W / 2
             if lo > hi:
                 return result("ABORT_UNSAFE")
             far, target = far_hi, (lo + hi) / 2
+            far_bound = True                           # only an upper bound - the top leg measures it
             log.append(f"B: end already passed (between {far_lo:.0f} and {far_hi:.1f})")
         else:
             return result("ABORT_WALL" if res == "WALL" else "ABORT_NO_EDGE")
@@ -936,7 +1077,7 @@ def loop_obs2(send, read_us, read_ir, arrow2, Y, d_front, dodge_side="LEFT",
     if nears:
         far_meas = ir_pos(pose)[1] - _median(nears)    # IR looks down at the far end
         log.append(f"top: far end from IR {far_meas:.1f}")
-        if play == "A" or far is None:
+        if play == "A" or far is None or far_bound:
             far = far_meas
     if res == "SPIKE":
         pose.x += depth - (ir_pos(p_sp)[0] - lag)      # re-zero x on the back corner
@@ -1059,7 +1200,7 @@ def return_to_carpark_edge(send, read_us, read_ir, loop_res, arrow2, gap12, g1,
         are robot-centre endpoints; arcs are checked at start / midpoint / end only.
     """
     W, Lr, a = C.ROBOT_WIDTH_CM, C.ROBOT_LENGTH_CM, C.SENSOR_FORWARD_CM
-    clear, deg = C.MIN_CLEARANCE_CM, C.ANGLE_TURN_DEG
+    clear, deg = CLEAR_CM, C.ANGLE_TURN_DEG
     m = 1 if arrow2 == "LEFT" else -1
     pose = _Pose(m * loop_res["y"])
     pose.x, pose.h = loop_res["x"], m * loop_res["heading"]
@@ -1091,8 +1232,8 @@ def return_to_carpark_edge(send, read_us, read_ir, loop_res, arrow2, gap12, g1,
             pose.move(st if cmd == "FW" else -st)
             left -= st
 
-    def path_ok(seq):
-        return all(_box_clear(q, b, W, Lr) >= clear + PLAN_MARGIN_CM
+    def path_ok(seq, need=NEEDS[-1]):
+        return all(_box_clear(q, b, W, Lr) >= need
                    for q in _path_points(pose, seq, m) for b in boxes)
 
     def front_x():
@@ -1113,7 +1254,8 @@ def return_to_carpark_edge(send, read_us, read_ir, loop_res, arrow2, gap12, g1,
 
     # ================= 1. LANE SHIFT =================
     plan = _plan_s_curve(pose, lane_y, m)
-    pre = next((p for p in range(0, 122, 2) if path_ok(([p] if p else []) + plan)), None)
+    pre = next((p for need in NEEDS for p in range(0, 122, 2)
+                if path_ok(([p] if p else []) + plan, need)), None)
     if pre is None:
         log.append("lane shift: no safe plan found - nothing executed")
         return result("ABORT_UNSAFE")
@@ -1226,6 +1368,9 @@ def return_to_carpark_edge(send, read_us, read_ir, loop_res, arrow2, gap12, g1,
         L_cmd, R_cmd = ("LT", "RT") if m == 1 else ("RT", "LT")   # L_cmd = toward the arm
         for t in (L_cmd, R_cmd):
             name = f"{t}{deg}"
+            if not path_ok([name], PHOTO_CLEAR_CM):
+                log.append(f"no room for the angled {name} ultrasonic check - skipped")
+                continue
             saved = pose.copy(); turn(name)
             u = _us_median(read_us, n=5, tol=3.0, lo=5, hi=200)
             hr = math.radians(pose.h)
@@ -1254,7 +1399,7 @@ def park_in_carpark(send, read_us, read_ir_left, read_ir_right, home_res, arrow2
                     cp_half=30.0, cp_depth=50.0, arm_t=10.0, entry_gap=10.0,
                     entry_min=-15.0, park_back_cm=None, s=0.0, ir_fwd=0.0, ir_in_max=35.0,
                     centre_tol=8.0, max_fixes=1, step_cm=4, us_tol=12.0,
-                    us_tol_locked=4.0, max_travel_cm=120.0, read_heading=None):
+                    us_tol_locked=4.0, max_travel_cm=120.0, depth_extra=50.0, read_heading=None):
     """
     Task 2, Step 5 - from the stop in front of the carpark arm (return_to_carpark_edge)
     into the carpark, centred, and stop clear of the back wall.
@@ -1266,7 +1411,8 @@ def park_in_carpark(send, read_us, read_ir_left, read_ir_right, home_res, arrow2
            obstacle 1 is close to the carpark and there is no room to finish outside. Simulated against both arms, the back wall AND obstacle 1
            first; shifts the start forward or back if it needs room. Nothing runs if no
            safe plan exists.
-        2. Check the ultrasonic now sees the BACK WALL (about entry_gap + cp_depth away).
+        2. Check the ultrasonic now sees the BACK WALL (about entry_gap + cp_depth away, or
+           up to depth_extra more - that reading sets the real depth and the stop point).
            If it still sees the arm (about entry_gap) the S-curve fell short -> stop.
         3. Drive in in steps. Once both side IRs are between the arms they drop to about
            (inside width - robot width) / 2 each; left vs right gives the sideways error.
@@ -1284,13 +1430,15 @@ def park_in_carpark(send, read_us, read_ir_left, read_ir_right, home_res, arrow2
         arrow2                     : obstacle 2's arrow (same as the earlier steps - it sets
                                      which side of the carpark the robot is on).
         cp_half                    : half the carpark's inside width (60 / 2 = 30).
-        cp_depth                   : carpark inside depth, front plane -> back wall (50).
+        cp_depth                   : carpark inside depth, front plane -> back wall (50) -
+                                     the MINIMUM; the real one is measured on entry.
+        depth_extra                : how much deeper than cp_depth the carpark may be (cm).
         arm_t                      : arm / wall thickness (cm), for the clearance model.
         entry_gap                  : preferred front -> carpark front plane after the S-curve (cm).
         entry_min                  : closest allowed finish (cm, negative = inside the opening).
         park_back_cm               : ultrasonic -> back wall distance to stop at (cm).
-                                     Default (cp_depth - ROBOT_LENGTH_CM) / 2 = equal margin
-                                     front and back.
+                                     Default (measured depth - ROBOT_LENGTH_CM) / 2 = equal
+                                     margin front and back.
         s, ir_fwd                  : IR face inset from the side / forward offset (cm).
         ir_in_max                  : side-IR readings at or below this mean "wall beside me".
         centre_tol                 : sideways error (cm) allowed before a re-entry fix.
@@ -1302,7 +1450,7 @@ def park_in_carpark(send, read_us, read_ir_left, read_ir_right, home_res, arrow2
         read_heading()             : optional gyro heading vs the run's start heading (deg,
                                      + = left); syncs the tracked heading after every turn.
         Reads from config.py: TURN45_MODELS, SMALL_TURN_MODELS, ANGLE_TURN_DEG,
-        SENSOR_FORWARD_CM, ROBOT_WIDTH_CM, ROBOT_LENGTH_CM, MIN_CLEARANCE_CM,
+        SENSOR_FORWARD_CM, ROBOT_WIDTH_CM, ROBOT_LENGTH_CM, T2_MIN_CLEARANCE_CM, T2_CARPARK_CLEARANCE_CM,
         MAX_STRAIGHT_COMMAND_CM.
 
     OUTPUT (dict)
@@ -1321,7 +1469,7 @@ def park_in_carpark(send, read_us, read_ir_left, read_ir_right, home_res, arrow2
         IRs are mounted alike (same inset s and forward offset ir_fwd).
     """
     W, Lr, a = C.ROBOT_WIDTH_CM, C.ROBOT_LENGTH_CM, C.SENSOR_FORWARD_CM
-    clear = C.MIN_CLEARANCE_CM
+    clear, cp_clear = CLEAR_CM, CARPARK_CLEAR_CM          # obstacle 1 / the carpark itself
     m = 1 if arrow2 == "LEFT" else -1
     ir_plus, ir_minus = (read_ir_right, read_ir_left) if m == 1 else (read_ir_left, read_ir_right)
     pose = _Pose(m * home_res["y"])
@@ -1357,9 +1505,10 @@ def park_in_carpark(send, read_us, read_ir_left, read_ir_right, home_res, arrow2
     def back_gap():
         return front_x() - back_x
 
-    def path_ok(seq):
-        return all(_box_clear(q, b, W, Lr) >= clear + PLAN_MARGIN_CM
-                   for q in _path_points(pose, seq, m) for b in boxes)
+    def path_ok(seq, need=NEEDS[-1]):
+        """boxes[:3] are the carpark (arms, back wall), the rest obstacle 1."""
+        return all(_box_clear(q, b, W, Lr) >= (cp_clear + PLAN_MARGIN_CM if i < 3 else need)
+                   for q in _path_points(pose, seq, m) for i, b in enumerate(boxes))
 
     def plan_entry():
         """S-curve to y = 0 ending straight with the front entry_gap outside, plus the
@@ -1370,12 +1519,13 @@ def park_in_carpark(send, read_us, read_ir_left, read_ir_right, home_res, arrow2
             end.move(*_turn_model(it, m)) if isinstance(it, str) else end.move(it)
         end_front = end.x + a * math.cos(math.radians(end.h))
         pre0 = int(round(end_front - entry_gap))          # + = FW first, - = BW first
-        for k in range(0, 62, 2):                         # nearest working start first
-            for pre in ((pre0,) if k == 0 else (pre0 + k, pre0 - k)):
-                if end_front - pre < entry_min:           # don't finish too deep inside
-                    continue
-                if path_ok(([pre] if pre else []) + plan):
-                    return pre, plan
+        for need in NEEDS:
+            for k in range(0, 62, 2):                     # nearest working start first
+                for pre in ((pre0,) if k == 0 else (pre0 + k, pre0 - k)):
+                    if end_front - pre < entry_min:       # don't finish too deep inside
+                        continue
+                    if path_ok(([pre] if pre else []) + plan, need):
+                        return pre, plan
         return None
 
     def run(pre, plan):
@@ -1404,9 +1554,18 @@ def park_in_carpark(send, read_us, read_ir_left, read_ir_right, home_res, arrow2
     run(*pl)
 
     # ================= 2. ULTRASONIC MUST SEE THE BACK WALL =================
+    # The front plane is known from the arm (step 4), so the back wall reading gives the
+    # REAL depth (cp_depth is the minimum) -> park in the middle of it.
     u = _us_median(read_us, lo=5, hi=200)
-    if u is not None and abs(u - back_gap()) <= us_tol:
-        pose.x += (u + back_x) - front_x()                # re-zero on the back wall
+    depth = None if u is None else u - front_x()
+    if depth is not None and cp_depth - us_tol <= depth <= cp_depth + depth_extra:
+        back_x = -depth
+        boxes[:3] = [(back_x - arm_t, 0.0, -cp_half - arm_t, -cp_half),
+                     (back_x - arm_t, 0.0, cp_half, cp_half + arm_t),
+                     (back_x - arm_t, back_x, -cp_half - arm_t, cp_half + arm_t)]
+        if park_back_cm is None:
+            park_back = (depth - Lr) / 2
+        log.append(f"back wall: carpark depth {depth:.1f} cm -> stop {park_back:.1f} cm off it")
     elif u is not None and front_x() > 0 and abs(u - front_x()) <= min(us_tol, front_x() + 2):
         log.append(f"ultrasonic {u:.1f} = the arm, not the back wall - S-curve fell short")
         return result("MISALIGNED")
@@ -1480,6 +1639,8 @@ def run_task2(send, read_us, read_ir_left, read_ir_right, snap,
               u2_far_end=getattr(C, "T2_U2_FAR_END_CM", 18.5),
               ac_stop=getattr(C, "T2_AC_STOP_CARPARK_CM", 70.0),
               arm_t=getattr(C, "T2_CARPARK_ARM_CM", 10.0),
+              cp_half=getattr(C, "T2_CARPARK_HALF_CM", 30.0),
+              cp_depth=getattr(C, "T2_CARPARK_DEPTH_CM", 50.0),
               read_heading=None, drive_edge=None):
     """
     Task 2 runner - the whole fastest-car run, steps 0 -> 5. Stops at the first step
@@ -1511,6 +1672,7 @@ def run_task2(send, read_us, read_ir_left, read_ir_right, snap,
         u2_far_end                  : far end assumed after U2 (short obstacle) - the middle of
                                       the possible 15-22 cm range.
         ac_stop, arm_t              : see return_to_carpark_edge.
+        cp_half, cp_depth           : carpark inside half-width / depth (cm).
         drive_edge                  : the STM IE command (module doc) - IR legs in ONE command.
                                       None = old FW3 + IR stepping (old firmware).
         read_heading                : optional gyro: heading vs the start heading (deg, + = left).
@@ -1575,7 +1737,10 @@ def run_task2(send, read_us, read_ir_left, read_ir_right, snap,
 
     # ---- 4. home to the carpark edge ----
     g1 = r0["D1"] + ac_obs1 + a - cp_front_from_start
-    r4 = return_to_carpark_edge(send, read_us, ir2, r3, arrow2, gap12, g1,
+    # home lane: the side IR reads g (like on the way out) when passing obstacle 1
+    home_lane = 5.0 + g + C.ROBOT_WIDTH_CM / 2 - s
+    r4 = return_to_carpark_edge(send, read_us, ir2, r3, arrow2, gap12, g1, cp_half=cp_half,
+                                lane_y=home_lane,
                                 ac_stop=ac_stop, arm_t=arm_t, ir_fwd=ir_fwd, s=s, lag=lag,
                                 read_heading=read_heading, drive_edge=drive_edge)
     out["home"] = r4
@@ -1584,7 +1749,7 @@ def run_task2(send, read_us, read_ir_left, read_ir_right, snap,
 
     # ---- 5. park ----
     r5 = park_in_carpark(send, read_us, read_ir_left, read_ir_right, r4, arrow2,
-                         arm_t=arm_t, s=s, ir_fwd=ir_fwd, read_heading=read_heading)
+                         cp_half=cp_half, cp_depth=cp_depth, arm_t=arm_t, s=s, ir_fwd=ir_fwd, read_heading=read_heading)
     out["park"] = r5
     out["status"] = "OK" if r5["status"] == "OK" else "PARK_" + r5["status"]
     return out

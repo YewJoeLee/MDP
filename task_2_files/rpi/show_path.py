@@ -10,7 +10,7 @@ Usage (laptop, in this folder):
     python show_path.py --all                             # all 4 arrow combinations, one page
 
 Arena layout (same as the brief's picture, seen from above):
-    carpark (60 x 50 cm inside) on the left, opening facing right
+    carpark (inside size from config.py T2_CARPARK_*) on the left, opening facing right
     obstacle 1 (10 x 10)  G1 cm after the carpark opening      (60-150)
     obstacle 2 (10 x L)   G2 cm after obstacle 1's back face   (60-150), L >= 30
     optional walls        `wall` cm beyond each end of obstacle 2 (50 minimum in the rules)
@@ -112,7 +112,7 @@ def turn_arc(p, f, r, dg, n=None):
 class RecWorld(sim.World):
     def __init__(self, *a, rear_gap=6.0, **k):
         super().__init__(*a, **k)
-        self.p.x = -50 + LR / 2 + rear_gap
+        self.p.x = -sim.CPD + LR / 2 + rear_gap
         self.phase = "start_to_obs1"
         self.trace = [(self.p.x, self.p.y, self.p.h, self.phase, None)]
         self.cmd_log = []                      # (phase, cmd)
@@ -197,7 +197,7 @@ def run_scenario(g1, g2, length, a1, a2, wall, rear_gap, noise, seed):
     hr = math.radians(p.h)
     xs = [p.x + f * LR / 2 * math.cos(hr) + s * W / 2 * math.sin(hr) for f in (1, -1) for s in (1, -1)]
     ys = [p.y + f * LR / 2 * math.sin(hr) - s * W / 2 * math.cos(hr) for f in (1, -1) for s in (1, -1)]
-    inside = max(xs) <= 0 and min(xs) >= -50 and max(ys) <= 30 and min(ys) >= -30
+    inside = max(xs) <= 0 and min(xs) >= -sim.CPD and max(ys) <= sim.CPH and min(ys) >= -sim.CPH
     return {"world": w, "out": out, "inside": inside, "error": error,
             "args": dict(g1=g1, g2=g2, length=length, a1=a1, a2=a2, wall=wall)}
 
@@ -233,7 +233,7 @@ def print_report(r):
     print(f"Status {out['status']}  ·  parked inside: {r['inside']}  ·  {len(w.cmd_log)} commands  ·  "
           f"path {path_length(w.trace):.0f} cm")
     print(f"Closest approach {worst[1][0]:.1f} cm to {NICE.get(worst[0], worst[0])} (during {worst[1][4]})"
-          f"  ·  MIN_CLEARANCE_CM = {C.MIN_CLEARANCE_CM:g}")
+          f"  ·  T2_MIN_CLEARANCE_CM = {C.T2_MIN_CLEARANCE_CM:g}")
     if r["error"]:
         print(r["error"])
 
@@ -307,13 +307,13 @@ def draw(r, uid):
     for gy in range(int(ymin // 10) * 10, int(ymax) + 1, 10):
         parts.append(f'<line x1="{xmin}" y1="{-gy}" x2="{xmax}" y2="{-gy}" class="grid"/>')
 
-    # carpark (inside 60 x 50) + carpark centre line
-    parts.append(box_svg((-50, 0, -30, 30), "#fff4a8", extra='opacity="0.55"'))
+    # carpark (inside) + carpark centre line
+    parts.append(box_svg((-sim.CPD, 0, -sim.CPH, sim.CPH), "#fff4a8", extra='opacity="0.55"'))
     for k in ("arm_up", "arm_dn", "back"):
         parts.append(box_svg(B[k], "#5872c0"))
     parts.append(f'<line x1="{xmin}" y1="0" x2="{xmax}" y2="0" stroke="#9aa" stroke-width="0.4" '
                  f'stroke-dasharray="3,3"/>')
-    parts.append('<text x="-25" y="-33" font-size="5" text-anchor="middle" fill="#665c00">CARPARK 60×50</text>')
+    parts.append(f'<text x="{-sim.CPD / 2:g}" y="{-sim.CPH - 3:g}" font-size="5" text-anchor="middle" fill="#665c00">CARPARK {2 * sim.CPH:g}×{sim.CPD:g}</text>')
 
     # walls
     for k in ("wall_up", "wall_dn"):
@@ -384,7 +384,7 @@ def draw(r, uid):
     # closest approach marker
     worst = closest(w)
     g, wx, wy, wh, wcmd = worst[1]
-    ok = g >= C.MIN_CLEARANCE_CM
+    ok = g >= C.T2_MIN_CLEARANCE_CM
     parts.append(robot_svg(wx, wy, wh, "#d00" if not ok else "#999", 'stroke-dasharray="1,1"', width=0.6))
     parts.append(f'<circle cx="{wx:.1f}" cy="{-wy:.1f}" r="5" fill="none" stroke="{"#d00" if not ok else "#999"}" '
                  f'stroke-width="0.6"><title>Closest: {g:.1f} cm to {NICE.get(worst[0], worst[0])} '
@@ -416,7 +416,7 @@ def summarise(res):
 def scenario_html(r, uid):
     w, out, ar = r["world"], r["out"], r["args"]
     worst = closest(w)
-    ok = out.get("status") == "OK" and r["inside"] and worst[1][0] >= C.MIN_CLEARANCE_CM
+    ok = out.get("status") == "OK" and r["inside"] and worst[1][0] >= C.T2_MIN_CLEARANCE_CM
     badge = (f'<span class="badge {"ok" if ok else "bad"}">{"PASS" if ok else "CHECK"}</span>')
     steps = []
     for fname, label, colour in PHASES:
@@ -431,7 +431,7 @@ def scenario_html(r, uid):
                      f'<code>{html.escape(" ".join(cmds)) or "(no moves)"}</code>'
                      f'<div class="muted small">{html.escape(summarise(res))}</div>{log_html}</li>')
     clear_rows = "".join(
-        f'<tr class="{"warn" if v[0] < C.MIN_CLEARANCE_CM else ""}"><td>{NICE.get(k, k)}</td>'
+        f'<tr class="{"warn" if v[0] < C.T2_MIN_CLEARANCE_CM else ""}"><td>{NICE.get(k, k)}</td>'
         f'<td>{v[0]:.1f} cm</td><td>{html.escape(str(v[4]))}</td></tr>'
         for k, v in sorted(w.min_by_obj.items(), key=lambda kv: kv[1][0]))
     err = f'<pre class="err">{html.escape(r["error"])}</pre>' if r["error"] else ""
@@ -484,7 +484,7 @@ def page(results):
 <p class="small muted">Blue blocks: carpark arms / back wall and obstacles (blue dot = arrow image, white arrow = its direction).
 Black bars: possible walls. Yellow: carpark inside. Green box: start pose. Dashed boxes: robot at the end of each step.
 Faint boxes with a ring: photo poses (ring = camera/ultrasonic). Solid box: final pose (green fill = fully inside the carpark).
-Dotted box + circle: the closest approach to anything (red if below MIN_CLEARANCE_CM = {C.MIN_CLEARANCE_CM:g} cm).
+Dotted box + circle: the closest approach to anything (red if below T2_MIN_CLEARANCE_CM = {C.T2_MIN_CLEARANCE_CM:g} cm).
 Hover a ring or circle for details. Turns are drawn as smooth arcs ending on the config.py turn models.</p>
 {body}"""
 

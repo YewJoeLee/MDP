@@ -54,7 +54,7 @@ LOG_FILE = "stm_console_log.txt"
 
 # Which side each IR is on. Check once: put your hand by one side, send  ir , see
 # which number drops, and swap these two if needed.
-IR_NAMES = {"IR1": "IR1 (left)", "IR2": "IR2 (right)"}
+IR_NAMES = {"IR1": "IR1 (right)", "IR2": "IR2 (left)"}   # match IR_LEFT / IR_RIGHT in rpi_client_task2.py
 
 MOVE_TIMEOUT_S = 20        # FW/BW/turns: firmware gives up after 15 s
 AC_TIMEOUT_S = 65          # AC: firmware gives up after 60 s

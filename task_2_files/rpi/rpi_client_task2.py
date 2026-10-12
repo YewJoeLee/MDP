@@ -28,8 +28,19 @@ Everything (every command, every reply, every sensor reading) also goes to
 photos/task2_run_<n>.log for debugging.
 
 Ctrl+C at any time sends STOP to the STM.
+
+Robust start (can be launched from any folder, over SSH, or by another program):
+  - works from the script's own folder, so photos/, config.py and the YOLO model are
+    always found (the model is also looked for one folder up and in the home folder)
+  - serial port: /dev/ttyACM0, else the first ttyACM* / ttyUSB* found
+  - no keyboard (stdin not a terminal) -> starts at once, no Enter prompt
+  - BI retried up to 3 times; still unstable -> carries on with the STM's start-up bias
+  - a dropped STM command (ERR RX_REJECTED) is re-sent once, only if it never ran
+  - a camera / YOLO error on one photo counts as "no arrow" instead of ending the run
+  - any unexpected error sends STOP to the STM and prints the full traceback
 """
 import argparse
+import glob
 import math
 import os
 import queue
@@ -37,19 +48,27 @@ import re
 import sys
 import threading
 import time
+import traceback
 from datetime import datetime
 
+# Run from this script's folder whatever folder it was started from, so photos/,
+# config.py, task2.py and the model are always found.
+HERE = os.path.dirname(os.path.abspath(__file__))
+os.chdir(HERE)
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+
 import config as C
-import task2 as T
+import task2 as T                      # also fills in Task 2 settings an older config.py lacks
 
 PORT = "/dev/ttyACM0"
 BAUD = 115200
-MODEL_PATH = "best_ncnn_model"
+MODEL_NAME = "best_ncnn_model"
 FRAME_SIZE = (416, 416)
 PHOTO_DIR = "photos"
 
 # Which STM IR is on which side - check with stm_console.py (hand beside one side, "ir").
-IR_LEFT, IR_RIGHT = "IR1", "IR2"
+IR_LEFT, IR_RIGHT = "IR2", "IR1"
 IR_MAX_CM = 80.0            # Sharp GP2Y0A21 range is 10-80 cm; beyond = "nothing there"
 US_MAX_CM = 400.0
 
@@ -79,6 +98,24 @@ class MoveFailed(Exception):
     pass
 
 
+def find_model():
+    """The YOLO model folder: next to this script, one folder up, or in the home folder."""
+    for d in (HERE, os.path.dirname(HERE), os.path.expanduser("~")):
+        path = os.path.join(d, MODEL_NAME)
+        if os.path.exists(path):
+            return path
+    raise FileNotFoundError(f"{MODEL_NAME} not found next to {os.path.basename(__file__)}, "
+                            f"in {os.path.dirname(HERE)} or in {os.path.expanduser('~')}")
+
+
+def find_port(wanted):
+    """wanted if it exists, else the first /dev/ttyACM* or /dev/ttyUSB*."""
+    if os.path.exists(wanted):
+        return wanted
+    others = sorted(glob.glob("/dev/ttyACM*")) + sorted(glob.glob("/dev/ttyUSB*"))
+    return others[0] if others else wanted
+
+
 # =============================================================================
 # Output: clean screen + full log file
 # =============================================================================
@@ -87,13 +124,26 @@ class Out:
     def __init__(self, log_path):
         self.log = open(log_path, "a", encoding="utf-8")
         self.pending = None            # [cmd, count] waiting to be printed collapsed
+        self.us_line = []              # ultrasonic readings in a row, printed as one line
         self.t0 = time.time()
 
     def logf(self, text):
         self.log.write(f"{time.time() - self.t0:7.2f}  {text}\n")
         self.log.flush()
 
+    def flush_us(self):
+        if self.us_line:
+            print("     US " + " ".join(self.us_line) + " cm")
+            self.us_line = []
+
+    def us(self, v):
+        """Ultrasonic readings in a row go on one screen line: 'US 40.1 40.0 - 40.2 cm'."""
+        if self.pending:
+            self.flush_cmds()
+        self.us_line.append("-" if v is None else f"{v:.1f}")
+
     def flush_cmds(self):
+        self.flush_us()
         if self.pending:
             cmd, n, ok_txt = self.pending
             m = MOVE_RE.match(cmd)
@@ -190,6 +240,36 @@ class Stm:
                 return line
         return None
 
+    def move(self, cmd, timeout=20.0):
+        """Send one MOVE command and return its own 'DONE <cmd> ...' line (or an ERR line,
+        or None on timeout). If the STM says ERR RX_REJECTED the command may have been
+        dropped: a US probe tells. The STM runs commands in order, so if the US answer
+        comes back before 'DONE <cmd>', the command never ran and is sent once more."""
+        for attempt in (1, 2):
+            line = self.ask(cmd, done=(f"DONE {cmd} ", f"DONE {cmd}\r", "ERR"), timeout=timeout)
+            if line is None or not line.startswith("ERR RX_REJECTED"):
+                return line
+            OUT.logf(f"   {cmd}: ERR RX_REJECTED - checking whether it ran")
+            self.ser.write(b"US\n")
+            self.ser.flush()
+            end = time.time() + timeout
+            got = None
+            while time.time() < end:
+                try:
+                    l2 = self.q.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                OUT.logf(f"   << {l2}")
+                if l2.startswith(f"DONE {cmd}"):
+                    got = l2                                   # it ran; the US reply follows
+                elif l2.startswith("US "):
+                    break
+            if got:
+                return got
+            if attempt == 1:
+                OUT.say(f"     ! {cmd} was dropped by the STM (RX_REJECTED) - sending it again")
+        return line
+
     def stop(self):
         try:
             self.ser.write(b"STOP\n")
@@ -210,7 +290,7 @@ class Stm:
     # ---- what task2.py calls ----
     def send(self, cmd):
         t0 = time.time()
-        line = self.ask(cmd, timeout=20.0)
+        line = self.move(cmd, timeout=20.0)
         dt = time.time() - t0
         if line is None:
             raise MoveFailed(f"{cmd}: no reply from the STM after {dt:.0f} s")
@@ -256,7 +336,7 @@ class Stm:
         """STM IE command: FW up to max_cm, stop at the edge the side IR sees (main_merged.c)."""
         cmd = f"IE{side[0]}{'N' if need_seen else 'A'}{max(1, min(1000, int(round(max_cm))))}"
         t0 = time.time()
-        line = self.ask(cmd, timeout=20.0)
+        line = self.move(cmd, timeout=20.0)
         if line is None:
             raise MoveFailed(f"{cmd}: no reply from the STM after {time.time() - t0:.0f} s")
         if line.startswith("ERR"):
@@ -271,14 +351,18 @@ class Stm:
         r = {"end": f.get("END", "MAX"), "edge_cm": cm("EDGE"), "near_cm": cm("NEAR"),
              "moved_cm": cm("MOVED") or 0.0, "cmd": cmd}
         self._sync_heading(cmd, line)
-        OUT.cmd(cmd, "   -> " + edge_note(r))
+        left, right = self.read_ir()                     # the side IR now, after the stop
+        r["ir_now_cm"] = left if side == "LEFT" else right
+        OUT.cmd(cmd, "   -> " + edge_note(r, side))
         return r
 
     def read_us(self):
         line = self.ask("US", done=("US ", "ERR"), timeout=3)
         m = re.search(r"US (-?\d+)", line or "")
         cm = int(m.group(1)) / 10 if m else -1
-        return cm if 2 < cm <= US_MAX_CM else None
+        cm = cm if 2 < cm <= US_MAX_CM else None
+        OUT.us(cm)
+        return cm
 
     def read_ir(self):
         line = self.ask("IR", done=("IR1", "ERR"), timeout=3) or ""
@@ -295,8 +379,17 @@ class Stm:
     def read_heading(self):
         return self.heading
 
-    def bias(self):
-        return self.ask("BI", done=("BIAS", "ERR"), timeout=10)
+    def bias(self, tries=3):
+        """BI until the STM reports a clean bias (up to `tries`). Returns (ok, last line)."""
+        line = None
+        for i in range(tries):
+            line = self.ask("BI", done=("BIAS", "ERR"), timeout=10)
+            if line is not None and "UNSTABLE" not in line and not line.startswith("ERR"):
+                return True, line
+            if i < tries - 1:
+                print(f"   BI: {line or 'no reply'} - keep the robot still, retrying ...")
+                time.sleep(1.5)
+        return False, line
 
     def close(self):
         self.alive = False
@@ -304,6 +397,68 @@ class Stm:
             self.ser.close()
         except Exception:
             pass
+
+
+# =============================================================================
+# Free the camera: stop any leftover program that still holds it
+# =============================================================================
+
+def camera_holders():
+    """{pid: command line} of other processes with /dev/media* or /dev/video* open."""
+    import glob, stat
+    devs = set()
+    for p in glob.glob("/dev/media*") + glob.glob("/dev/video*"):
+        try:
+            devs.add(os.stat(p).st_rdev)
+        except OSError:
+            pass
+    me, found = os.getpid(), {}
+    for d in os.listdir("/proc"):
+        if not d.isdigit() or int(d) == me:
+            continue
+        try:
+            for fd in os.listdir(f"/proc/{d}/fd"):
+                try:
+                    st = os.stat(f"/proc/{d}/fd/{fd}")
+                except OSError:
+                    continue
+                if stat.S_ISCHR(st.st_mode) and st.st_rdev in devs:
+                    with open(f"/proc/{d}/cmdline", "rb") as f:
+                        found[int(d)] = f.read().replace(b"\0", b" ").decode(errors="replace").strip()
+                    break
+        except OSError:                      # process gone, or another user's (root) process
+            continue
+    return found
+
+
+def free_camera(timeout_s=4.0):
+    """Stop every other process holding the camera. Returns True when the camera is free.
+    Ctrl+C first (lets the old script close the camera and stop the robot cleanly),
+    then SIGTERM, then SIGKILL. SIGCONT wakes a script paused with Ctrl+Z."""
+    import signal
+    holders = camera_holders()
+    if not holders:
+        return True
+    for pid, cmd in holders.items():
+        print(f"   camera held by PID {pid} ({cmd or '?'}) - stopping it")
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGKILL):
+        for pid in list(holders):
+            try:
+                os.kill(pid, signal.SIGCONT)
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                holders.pop(pid)
+            except PermissionError:
+                print(f"   ! no permission to stop PID {pid} - run:  sudo kill {pid}")
+                return False
+        t_end = time.time() + timeout_s
+        while time.time() < t_end:
+            holders = {p: c for p, c in holders.items() if os.path.exists(f"/proc/{p}")}
+            if not holders:
+                time.sleep(0.5)                  # let libcamera release the pipeline
+                return not camera_holders()
+            time.sleep(0.1)
+    return not camera_holders()
 
 
 # =============================================================================
@@ -316,16 +471,31 @@ class Camera:
         from ultralytics import YOLO
         import cv2
         self.cv2, self.run, self.n = cv2, run, 0
+        free_camera()                                     # kill a leftover run still holding it
         self.cam = Picamera2()
-        self.cam.preview_configuration.main.size = FRAME_SIZE
-        self.cam.preview_configuration.main.format = "BGR888"
-        self.cam.preview_configuration.align()
-        self.cam.configure("preview")
-        self.cam.start()
-        self.model = YOLO(MODEL_PATH)
-        self.model(self.cam.capture_array(), conf=C.MODEL_MIN_CONF, imgsz=416, verbose=False)  # warm-up
+        try:
+            self.cam.preview_configuration.main.size = FRAME_SIZE
+            self.cam.preview_configuration.main.format = "BGR888"
+            self.cam.preview_configuration.align()
+            self.cam.configure("preview")
+            self.cam.start()
+            time.sleep(1.0)                               # exposure / white balance settle
+            self.model_path = find_model()
+            self.model = YOLO(self.model_path, task="detect")
+            self.model(self.cam.capture_array(), conf=C.MODEL_MIN_CONF, imgsz=416, verbose=False)  # warm-up
+        except BaseException:
+            self.close()                                  # never leave the camera half-open
+            raise
 
     def snap(self, step):
+        """Never raises: a camera / YOLO error is logged and counts as 'no arrow'."""
+        try:
+            return self._snap(step)
+        except Exception as e:
+            OUT.logf("camera / YOLO error:\n" + traceback.format_exc())
+            return None, f"(camera error: {e})"
+
+    def _snap(self, step):
         self.n += 1
         frame = self.cam.capture_array()
         res = self.model(frame, conf=C.MODEL_MIN_CONF, iou=0.45, imgsz=416, verbose=False)[0]
@@ -350,6 +520,7 @@ class Camera:
     def close(self):
         try:
             self.cam.stop()
+            self.cam.close()
         except Exception:
             pass
 
@@ -373,6 +544,7 @@ class SimRobot:
     def read_us(self):
         v = self.w.read_us()
         OUT.logf(f"   US {v}")
+        OUT.us(v)
         return v
 
     def read_ir_left(self):
@@ -388,7 +560,8 @@ class SimRobot:
     def drive_edge(self, side, need_seen, max_cm):
         OUT.logf(f">> IE {side} {need_seen} {max_cm}")
         r = self.w.drive_edge(side, need_seen, max_cm)
-        OUT.cmd(r["cmd"], "   -> " + edge_note(r))
+        r["ir_now_cm"] = self.w.read_ir_left() if side == "LEFT" else self.w.read_ir_right()
+        OUT.cmd(r["cmd"], "   -> " + edge_note(r, side))
         return r
 
     read_heading = None
@@ -404,16 +577,19 @@ class SimRobot:
 # Printing each step
 # =============================================================================
 
-def edge_note(r):
-    """Short text for an IE result: what stopped it and where."""
-    what = {"EDGE": "edge", "NEVER": "nothing beside", "MAX": "no edge before max",
-            "WALL": "WALL GUARD"}.get(r["end"], r["end"])
-    txt = f"{what}"
+def edge_note(r, side=None):
+    """Short text for an IE result: the side IR beside the obstacle, where it spiked
+    (near -> far), what it reads now, where the robot stopped."""
+    ir = f"IR {side.lower()}" if side else "IR"
+    txt = f"{ir} beside {f1(r.get('near_cm'))} cm"
+    what = {"EDGE": "SPIKE near->far", "NEVER": "far from the start (nothing beside)",
+            "MAX": "no spike before max", "WALL": "WALL GUARD"}.get(r["end"], r["end"])
+    txt += f" · {what}"
     if r.get("edge_cm") is not None:
         txt += f" at {r['edge_cm']:.1f} cm"
-    if r.get("near_cm") is not None:
-        txt += f", IR beside {r['near_cm']:.1f} cm"
-    return txt + f", moved {r['moved_cm']:.1f} cm"
+    if "ir_now_cm" in r:
+        txt += f" · {ir} now {'far' if r['ir_now_cm'] is None else format(r['ir_now_cm'], '.1f') + ' cm'}"
+    return txt + f" · stopped after {r['moved_cm']:.1f} cm"
 
 
 def f1(v):
@@ -424,7 +600,10 @@ def summary(fname, r):
     """One or two lines that say what the step found / decided."""
     g = r.get
     if fname == "start_to_obs1":
-        return f"arrow 1 = {g('arrow')} (conf {f1(g('conf'))}) · drove {f1(g('D1'))} cm"
+        how = {"seen": "", "guess": "  GUESSED (no photo >= " + format(C.RECOGNISED_CONF, "g") + ")",
+               "default": "  DEFAULT (no arrow in any photo)"}.get(g("arrow_how"), "")
+        return (f"US at AC {f1(g('us_ac'))} cm · arrow 1 = {g('arrow')} (conf {f1(g('conf'))}){how}"
+                f" · drove {f1(g('D1'))} cm")
     if fname == "dodge_plan":
         side = "left" if g("cmds", [""])[0].startswith("LT") else "right"
         return (f"pass on the {side}: {' '.join(g('cmds', []))} · IR gap {f1(g('gap_cm'))} cm · "
@@ -436,7 +615,8 @@ def summary(fname, r):
     if fname == "approach_and_snap_obs2":
         why = ("ultrasonic saw obstacle 2" if g("case") == "U1"
                else "no echo -> obstacle 2 is short, angled search")
-        return (f"{g('case')}: {why}\n         arrow 2 = {g('arrow')} (conf {f1(g('conf'))}) · "
+        how = {"seen": "", "guess": " GUESSED", "default": " DEFAULT (dodge side)"}.get(g("arrow_how"), "")
+        return (f"{g('case')}: {why}\n         arrow 2 = {g('arrow')} (conf {f1(g('conf'))}){how} · "
                 f"face {f1(g('d_front'))} cm ahead ({g('face_source')}) · offset {f1(g('Y'))} cm")
     if fname == "loop_obs2":
         why = {"A": "short obstacle seen in the photo -> one S-curve past its end",
@@ -566,8 +746,12 @@ def main():
 
     print(f"TASK 2 · run {run} · {'SIMULATION' if a.sim else 'robot on ' + a.port}")
     print(f"   AC at obstacle 1 {C.T2_AC_OBS1_CM:g} cm · IR gap {C.T2_IR_GAP_OBS1_CM:g} cm · "
-          f"min clearance {C.MIN_CLEARANCE_CM:g} cm · arrow trusted at conf >= {C.RECOGNISED_CONF:g}")
+          f"clearance aim {T.TARGET_CLEAR_CM:g} cm (never under {T.NEEDS[-1]:g}) · "
+          f"arrow trusted at conf >= {C.RECOGNISED_CONF:g}")
     print(f"   IR legs: {'FW3 + IR steps (--no-ie)' if a.no_ie else 'one IE command each'}")
+    if T.T2_MISSING:
+        print(f"   WARNING: {C.__file__} is an old copy - using built-in values for: "
+              + ", ".join(f"{k}={T.T2_DEFAULTS[k]}" for k in T.T2_MISSING))
     print(f"   log: {log_path}")
 
     robot = cam = None
@@ -577,30 +761,44 @@ def main():
             print(f"   sim arena: G1 {a.g1:g} · G2 {a.g2:g} · L {a.length:g} · wall {a.wall:g} · "
                   f"arrows {a.a1}/{a.a2}")
         else:
+            port = find_port(a.port)
             try:
-                robot = Stm(a.port, BAUD)
+                robot = Stm(port, BAUD)
             except Exception as e:
-                print(f"!! cannot open {a.port}: {e}  (STM plugged in? another script using it?)")
+                print(f"!! cannot open {port}: {e}  (STM plugged in? another script using it?)")
                 return 1
+            print(f"   STM on {port}")
             print("   camera + YOLO loading ...")
             try:
                 cam = Camera(run)
             except Exception as e:
+                OUT.logf(traceback.format_exc())
                 print(f"!! camera / model failed: {e}")
+                print("   (is rpi_client.py / snap_task2.py still holding the camera? is "
+                      f"{MODEL_NAME} on the Pi?)")
                 return 1
+            print(f"   model: {cam.model_path}")
             robot.snap = cam.snap
             if not a.no_bi:
                 print("   BI: gyro calibration - keep the robot still ...")
-                line = robot.bias()
+                ok, line = robot.bias()
                 print(f"   {line}")
-                if line is None or "UNSTABLE" in line:
-                    print("!! gyro bias not OK - run again with the robot still (or --no-bi)")
-                    return 1
-            print("   US {} cm · IR L/R {}".format(f1(robot.read_us()),
-                                                   " / ".join(f1(v) for v in robot.read_ir())))
+                if not ok:
+                    print("   ! gyro bias still not clean - carrying on with the STM's start-up bias")
+            us = robot.read_us()
+            OUT.flush_us()
+            ir = robot.read_ir()
+            print("   US {} cm · IR L/R {}".format(f1(us), " / ".join(f1(v) for v in ir)))
+            if us is None:
+                print("   ! ultrasonic sees nothing yet - the robot will creep forward until it finds obstacle 1")
 
-        if not a.go:
-            input("\nRobot in the carpark, facing obstacle 1. Enter = START (Ctrl+C = STOP) ")
+        if not a.go and sys.stdin is not None and sys.stdin.isatty():
+            try:
+                input("\nRobot in the carpark, facing obstacle 1. Enter = START (Ctrl+C = STOP) ")
+            except EOFError:
+                pass
+        else:
+            print("\n   starting now (--go or no keyboard)")
 
         state = {"step": "0", "times": {}}
         wrap_steps(state)
@@ -631,6 +829,13 @@ def main():
         if robot:
             robot.stop()
         return 130
+    except Exception as e:
+        OUT.say(f"\n!! CRASHED: {type(e).__name__}: {e}  - STOP sent (traceback below and in the log)")
+        OUT.logf(traceback.format_exc())
+        traceback.print_exc()
+        if robot:
+            robot.stop()
+        return 4
     finally:
         if cam:
             cam.close()
