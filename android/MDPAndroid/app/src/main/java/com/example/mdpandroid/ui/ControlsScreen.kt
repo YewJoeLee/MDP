@@ -25,7 +25,6 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -184,7 +183,7 @@ internal fun AssessmentCommandCard(
     state: AppState,
     onCommand: (RobotCommand) -> Unit,
     onSendArena: () -> Unit,
-    onFinishDemoTask: () -> Unit
+    onCancelTask: () -> Unit
 ) {
     val issue = state.taskStartIssue()
     Card(
@@ -203,9 +202,17 @@ internal fun AssessmentCommandCard(
                 TaskStartButton(state, RobotCommand.BEGIN_EXPLORE, onCommand, Modifier.weight(1f))
                 TaskStartButton(state, RobotCommand.BEGIN_FASTEST, onCommand, Modifier.weight(1f))
             }
-            if (state.taskRun?.simulated == true) {
-                OutlinedButton(onClick = onFinishDemoTask, modifier = Modifier.fillMaxWidth()) {
-                    Text("Finish demo task")
+            state.taskRun?.let { run ->
+                // Filled error colours so the escape hatch stands out against the navy card.
+                Button(
+                    onClick = onCancelTask,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError
+                    )
+                ) {
+                    Text(if (run.simulated) "Finish demo task" else "Cancel task", fontWeight = FontWeight.Bold)
                 }
             }
             SendArenaButton(enabled = state.canSendArena, onSendArena = onSendArena, modifier = Modifier.fillMaxWidth())
@@ -224,7 +231,7 @@ internal fun TaskStartButton(
 ) {
     Button(
         onClick = { onCommand(command) },
-        enabled = state.taskStartIssue() == null,
+        enabled = state.taskStartIssue(command) == null,
         modifier = modifier.heightIn(min = 48.dp),
         contentPadding = contentPadding
     ) {
@@ -241,11 +248,16 @@ internal fun SendArenaButton(
     label: String = "Send current arena to robot",
     contentPadding: PaddingValues = ButtonDefaults.ContentPadding
 ) {
-    OutlinedButton(
+    // Filled secondary colours: an outlined button was hard to spot on the navy assessment card.
+    Button(
         onClick = onSendArena,
         enabled = enabled,
         modifier = modifier.heightIn(min = 48.dp),
-        contentPadding = contentPadding
+        contentPadding = contentPadding,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = MaterialTheme.colorScheme.secondary,
+            contentColor = MaterialTheme.colorScheme.onSecondary
+        )
     ) {
         Text(label, textAlign = TextAlign.Center)
     }

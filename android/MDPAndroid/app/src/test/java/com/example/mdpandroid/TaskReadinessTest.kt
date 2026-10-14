@@ -27,6 +27,13 @@ class TaskReadinessTest {
         assertNull(ready.copy(obstacles = listOf(Obstacle("B1", 5, 5, targetId = "11", targetFace = Face.N))).taskStartIssue())
     }
 
+    @Test fun fastestPathDoesNotRequireASentArena() {
+        val unsent = AppState(connected = true)
+        assertNull(unsent.taskStartIssue(RobotCommand.BEGIN_FASTEST))
+        assertNotNull(unsent.taskStartIssue(RobotCommand.BEGIN_EXPLORE))
+        assertNotNull(AppState().taskStartIssue(RobotCommand.BEGIN_FASTEST))
+    }
+
     @Test fun reconnectRequiresResendingTheArena() {
         val reconnected = ready.connectedTo(BluetoothDeviceInfo("00:11:22:33:44:55", "Pi"))
         assertNull(reconnected.sentArena)

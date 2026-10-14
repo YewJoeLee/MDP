@@ -18,12 +18,13 @@ val AppState.canSendArena: Boolean
 val AppState.canDrive: Boolean
     get() = (connected || demoMode) && !taskActive
 
-/** Starting a task requires the current obstacle layout to have been sent successfully. */
-fun AppState.taskStartIssue(): String? = when {
+/** Starting Task 1 requires the current obstacle layout to have been sent successfully; Task 2 does not. */
+fun AppState.taskStartIssue(command: RobotCommand = RobotCommand.BEGIN_EXPLORE): String? = when {
     taskActive -> "A task is already active. Wait for it to finish."
     !connected && !demoMode -> "Connect to the robot before starting a task."
     driveCommandPending -> "Wait for the drive command to finish sending."
     arenaSendPending -> "Wait for the arena to finish sending."
+    command == RobotCommand.BEGIN_FASTEST -> null
     obstacles.isEmpty() -> "Add at least one obstacle before starting a task."
     obstacles.any { it.targetFace == null } -> "Set a face for every obstacle before starting a task."
     localRobotPose(robot.x, robot.y, robot.direction, obstacles) == null -> "Set a valid robot position before starting a task."

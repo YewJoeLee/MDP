@@ -406,7 +406,7 @@ class BluetoothController(
     private fun send(command: String) = sendCommands(listOf(command))
 
     private fun startTask(command: RobotCommand) {
-        state.taskStartIssue()?.let {
+        state.taskStartIssue(command)?.let {
             addStatus(it)
             return
         }
@@ -434,6 +434,15 @@ class BluetoothController(
         if (state.taskRun?.simulated != true) return
         state = state.copy(taskRun = null, sentArena = null)
         addStatus("Demo task finished. Send the arena before the next run.")
+    }
+
+    /** Lets the user abandon a run the robot never reports as complete; STOP jumps the send queue. */
+    fun cancelTask() {
+        val run = state.taskRun ?: return
+        if (run.simulated) return finishDemoTask()
+        state = state.copy(taskRun = null, sentArena = null)
+        send(RobotProtocol.command(RobotCommand.STOP))
+        addStatus("Task cancelled. Send the arena before the next run.")
     }
 
     private fun finishTaskFromRobot() {

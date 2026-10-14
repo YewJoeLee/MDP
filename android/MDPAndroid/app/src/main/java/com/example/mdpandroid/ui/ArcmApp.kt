@@ -148,7 +148,7 @@ fun ARCMApp(
                     state = state,
                     onCommand = onCommand,
                     onSendArena = onSendArena,
-                    onFinishDemoTask = controller::finishDemoTask
+                    onCancelTask = controller::cancelTask
                 )
                 RobotActivityCard(
                     history = controller.logHistory
