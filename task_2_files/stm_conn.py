@@ -20,6 +20,25 @@ At the  stm>  prompt:
     s                          ultrasonic + both IRs
     watch  (or w)              live US + IR readings, Ctrl+C to end
     stop                       stop the STM now
+    VS4199                     single FW/BW/AC at the run's speed (GO itself uses PW / PA)
+    PW3500  PI2800  PA3000     set the GO run's FW / drive-until-IR / AC PWM (2399-4199)
+    PV25                       robot speed (cm/s) at the PI PWM, used by TIME x SPEED
+    OTR  OTL                   obstacle-2 far-side test, exactly like GO:
+                               OTR = arrow RIGHT: LT180, then FW along with the LEFT IR
+                               OTL = arrow LEFT : RT180, then FW along with the RIGHT IR
+                               stops when the IR has passed the end, prints the length
+                               by ENCODER and by TIME x SPEED
+    OLL  OLR                   obstacle-length test with the LEFT / RIGHT IR: drives forward
+                               at the PI speed, sees the obstacle (< 40 cm), passes its end,
+                               prints its length: ENCODER, TIME x SPEED, READS x 20ms x SPEED
+    raw                        every STM line printed exactly as sent (default ON)
+    pretty                     also print a reworded summary under it (default OFF)
+    ez                         zero the encoder trip-meter
+    en                         encoder distance since ez (use: ez, FW100 LT45 FW20, en)
+    enc                        auto encoder print after every move ON / OFF (default ON).
+                               After every move: distance each wheel / average moved.
+                               After LT/RT/XL/XR: also the turning radius = avg / angle,
+                               e.g. LT45 -> the value for T2_R_LT45_CM in main.c
     FW30 RT45 FW10 s           several commands in one line run one after another
     3x FW10                    repeat a command (or a whole line) 3 times
     Enter on an empty line     repeat the last line
@@ -63,7 +82,7 @@ OTHER_TIMEOUT_S = 3
 
 MOVE_RE = re.compile(r"^(FW|BW|LT|RT|XL|XR|DL|DR)(\d+)$")
 FINISH_PREFIXES = ("DONE", "ERR", "BIAS", "YAW", "US ", "IR1", "TURNMODE", "SPEED", "SERVO",
-                   "SPD", "COAST", "INNER", "COMP")
+                   "SPD", "COAST", "INNER", "COMP", "T2PWM", "ENC")   # T2PWM: PW / PA replies (task 2 30s)
 
 
 # =============================================================================
@@ -123,13 +142,17 @@ class Link:
             pass
 
 
-def send(link, cmd):
+RAW = [True]      # print every STM line exactly as received ("raw" toggles)
+PRETTY = [False]  # also print the reworded summary under it ("pretty" toggles)
+
+
+def send(link, cmd, quiet=False):
     """Send one command and wait for the line that finishes it.
     Returns (finishing line or None, all lines received, seconds taken)."""
     link.drain()
     if cmd.startswith("AC"):
         timeout = AC_TIMEOUT_S
-    elif MOVE_RE.match(cmd) or cmd == "RA" or cmd.startswith("IE"):
+    elif MOVE_RE.match(cmd) or cmd == "RA" or cmd.startswith(("IE", "OL", "OT")):
         timeout = MOVE_TIMEOUT_S
     elif cmd == "YW":
         timeout = YW_TIMEOUT_S
@@ -137,7 +160,8 @@ def send(link, cmd):
         timeout = 15
     else:
         timeout = OTHER_TIMEOUT_S
-    known = MOVE_RE.match(cmd) or cmd[:2] in ("AC", "RA", "US", "IR", "BI", "YW", "TM", "VS", "SV", "SP", "IE")
+    known = MOVE_RE.match(cmd) or cmd[:2] in ("AC", "RA", "US", "IR", "BI", "YW", "TM", "VS", "SV", "SP", "IE",
+                                              "EZ", "EN", "OL", "OT")
     t0 = time.time()
     link.write(cmd)
     got, gy = [], 0
@@ -154,6 +178,8 @@ def send(link, cmd):
                 print(f"  !! serial error: {line[17:]}")
                 return None, got, time.time() - t0
             got.append(line)
+            if RAW[0] and not quiet and cmd != "GY":
+                print(f"  {line}")
             if cmd == "GY":
                 print(f"  {line}")
                 gy += 1
@@ -189,7 +215,7 @@ def stop(link):
 
 def fields(line):
     """'DONE AC30 US:302 MOVED:12 STATUS:OK' -> {'US': '302', 'MOVED': '12', 'STATUS': 'OK'}"""
-    return dict(m.groups() for m in re.finditer(r"([A-Z]+):(-?[\w./-]+)", line))
+    return dict(m.groups() for m in re.finditer(r"([A-Z][A-Z0-9_]*):(-?[\w./-]+)", line))
 
 
 def cm(mm):
@@ -213,7 +239,10 @@ def show(cmd, line, lines, secs):
     status = f.get("STATUS", line.split()[-1] if line.startswith("DONE") else "")
     flag = "" if status in ("OK", "") else f"   <-- {status}"
 
-    if cmd == "US" or line.startswith("US "):
+    if line.startswith("ENC"):
+        print(f"  Encoder since ez:  A {cm(f.get('A_MM'))}   B {cm(f.get('B_MM'))}"
+              f"   average {cm(f.get('AVG_MM'))}")
+    elif cmd == "US" or line.startswith("US "):
         m = re.search(r"US (-?\d+)", line)
         mm = int(m.group(1)) if m else None
         if mm is None or mm <= 0 or mm > 4000:
@@ -242,6 +271,34 @@ def show(cmd, line, lines, secs):
                 "WALL": "STOPPED BY WALL GUARD"}.get(f.get("END"), f.get("END"))
         print(f"  {cmd}: {what} · edge at {mm('EDGE')} · IR beside {mm('NEAR')} ({f.get('NN', 0)} reads)"
               f" · moved {mm('MOVED')} · {secs:.1f} s{flag}")
+    elif cmd.startswith("OT"):
+        for l in lines:
+            if l.startswith("T2 "):
+                print(f"  {l[3:]}")
+        def c(k):
+            v = f.get(k)
+            return "-" if v is None or int(v) < 0 else f"{int(v) / 10:.1f} cm"
+        path = "arrow RIGHT: LT180 + LEFT IR" if cmd == "OTR" else "arrow LEFT: RT180 + RIGHT IR"
+        print(f"  ===== {cmd} ({path}) - stopped: {f.get('END', '?')} =====")
+        print(f"  near stretch   ENCODER {c('ENC_MM')}   |   TIME x SPEED {c('TXV_MM')}"
+              f"   |   READS x 20ms x SPEED {c('NXV_MM')}")
+        beside = f.get("START") == "BESIDE"
+        print(f"  obstacle 2     ENCODER {c('OBS2_ENC_MM')}   |   TIME x SPEED {c('OBS2_TXV_MM')}"
+              f"   ({'+20 cm: IR already beside it after the 180' if beside else 'IR saw it begin, nothing added'})")
+        print(f"  IR saw it for {f.get('TIME_MS', '?')} ms over {f.get('N', '?')} reads, "
+              f"real speed {f.get('V_ENC', '?')} cm/s{flag}")
+    elif cmd.startswith("OL"):
+        for l in lines:
+            if l.startswith("T2 "):
+                print(f"  {l[3:]}")
+        def c(k):
+            v = f.get(k)
+            return "-" if v is None or int(v) < 0 else f"{int(v) / 10:.1f} cm"
+        print(f"  {cmd}: obstacle length  ENCODER {c('ENC_MM')}   TIME x SPEED {c('TXV_MM')}"
+              f"   READS x 20ms x SPEED {c('NXV_MM')}")
+        print(f"        seen for {f.get('TIME_MS', '?')} ms over {f.get('N', '?')} reads, "
+              f"real speed {f.get('V_ENC', '?')} cm/s (put this in T2_IR_SPEED_CMS), "
+              f"IR saw it {'from the start' if f.get('START') == 'BESIDE' else 'begin'}{flag}")
     elif cmd == "RA":
         print(f"  RA: drove back {f.get('UNDID', '?')} cm, {secs:.1f} s{flag}")
     elif MOVE_RE.match(cmd) and cmd[:2] in ("LT", "RT", "XL", "XR"):
@@ -259,8 +316,8 @@ def show(cmd, line, lines, secs):
 
 def sensors(link, quiet=False):
     """Ultrasonic + both IRs, printed on one line. Returns the text."""
-    l1, _, _ = send(link, "US")
-    l2, _, _ = send(link, "IR")
+    l1, _, _ = send(link, "US", quiet=True)
+    l2, _, _ = send(link, "IR", quiet=True)
     parts = []
     m = re.search(r"US (-?\d+)", l1 or "")
     mm = int(m.group(1)) if m else -1
@@ -269,7 +326,10 @@ def sensors(link, quiet=False):
         parts.append(f"{IR_NAMES.get(n, n)} {int(v) / 10:5.1f} cm")
     text = "   ".join(parts)
     if not quiet:
-        print("  " + text)
+        if RAW[0]:
+            print(f"  {l1}\n  {l2}")
+        else:
+            print("  " + text)
     return text
 
 
@@ -287,6 +347,41 @@ def watch(link, period=0.3):
 # =============================================================================
 # Command line handling
 # =============================================================================
+
+ENC_AUTO = [True]          # print encoder distance after every move ("enc" toggles)
+
+
+def enc_read(link):
+    """(A mm, B mm) from the STM trip-meter, or None (older firmware)."""
+    line, _, _ = send(link, "EN", quiet=True)
+    f = fields(line or "")
+    try:
+        return int(f["A_MM"]), int(f["B_MM"])
+    except (KeyError, ValueError):
+        return None
+
+
+def enc_report(cmd, before, after, line):
+    import math
+    if not before or not after:
+        return
+    a = (after[0] - before[0]) / 10.0
+    b = (after[1] - before[1]) / 10.0
+    avg = (a + b) / 2.0
+    print(f"  encoder: A {a:+.1f} cm   B {b:+.1f} cm   average {avg:+.1f} cm")
+    m = MOVE_RE.match(cmd)
+    if m and m.group(1) in ("LT", "RT", "XL", "XR"):
+        imu = fields(line or "").get("IMU")
+        try:
+            ang = abs(int(imu)) / 10.0
+        except (TypeError, ValueError):
+            ang = float(m.group(2))
+        if ang > 1:
+            r = abs(avg) / math.radians(ang)
+            print(f"  turn {ang:.1f} deg -> turning radius {r:.1f} cm "
+                  f"(sideways {r * (1 - math.cos(math.radians(ang))):.1f} cm, "
+                  f"forward {r * math.sin(math.radians(ang)):.1f} cm)")
+
 
 ALIASES = {"U": "US", "I": "IR", "B": "BI", "Q": "QUIT", "EXIT": "QUIT", "ST": "STOP",
            "W": "WATCH", "S": "SENSORS", "H": "HELP", "?": "HELP"}
@@ -314,6 +409,18 @@ def run_one(link, cmd):
         watch(link)
     elif cmd == "STOP":
         stop(link)
+    elif cmd == "RAW":
+        RAW[0] = not RAW[0]
+        print(f"  raw STM lines: {'ON' if RAW[0] else 'OFF'}")
+    elif cmd == "PRETTY":
+        PRETTY[0] = not PRETTY[0]
+        print(f"  reworded summaries: {'ON' if PRETTY[0] else 'OFF'}")
+    elif cmd == "ENC":
+        ENC_AUTO[0] = not ENC_AUTO[0]
+        print(f"  auto encoder print after moves: {'ON' if ENC_AUTO[0] else 'OFF'}")
+    elif cmd == "GO":
+        print("  GO runs the whole task 2 route and needs the camera to answer the snaps.")
+        print("  Use  python3 task2_30s.py  for that. Here you can test single moves.")
     else:
         if cmd[:2] in ("FW", "BW") and not re.fullmatch(r"(FW|BW)\d+", cmd):
             print(f"  {cmd}: needs a distance in cm, e.g. FW30")
@@ -326,8 +433,15 @@ def run_one(link, cmd):
             return True
         if cmd == "BI":
             print("  BI: calibrating gyro - keep the robot still ...")
+        is_move = bool(MOVE_RE.match(cmd)) or cmd[:2] in ("AC", "RA", "IE", "OL", "OT")
+        before = enc_read(link) if (is_move and ENC_AUTO[0]) else None
         line, lines, secs = send(link, cmd)
-        show(cmd, line, lines, secs)
+        if PRETTY[0] or not RAW[0]:
+            show(cmd, line, lines, secs)
+        elif line is None:
+            print(f"  ({cmd}: no reply after {secs:.1f} s)")
+        if before and line and not line.startswith(("ERR", "STOPPED BY YOU")):
+            enc_report(cmd, before, enc_read(link), line)
     return True
 
 

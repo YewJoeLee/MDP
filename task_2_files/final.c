@@ -29,6 +29,7 @@
 #include <math.h>
 #include <ctype.h>
 #include <errno.h>
+#include <stdarg.h>   /* TASK 2 30s: T2_Say() */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -175,6 +176,177 @@ static uint32_t last_cmd_tick = 0;
 #define GYRO_DEADBAND   0.3f
 #define TURN_LEFT   1
 #define TURN_RIGHT  (-1)
+
+/* =====================================================================
+ * TASK 2 (30 s) HARDCODED RUN  -  ALL SETTINGS YOU MAY WANT TO EDIT ARE HERE
+ * ---------------------------------------------------------------------
+ * The RPi sends "GO". The STM then runs the WHOLE route by itself and only
+ * asks the RPi for the two arrows:
+ *     STM -> RPi : "T2 SNAP 1"   /   "T2 SNAP 2"
+ *     RPi -> STM : "AL<conf%>"   (left)   or   "AR<conf%>"   (right), e.g. AL87
+ * Progress lines start with "T2 " and finish with "T2 END OK ..." or
+ * "T2 END FAIL AT:<step> ...". STOP still works at any time.
+ *
+ * Runtime overrides (no reflash needed, lost on reset):
+ *     PW<pwm>  fixed-distance FW PWM, 2399..4199, e.g. PW3500
+ *     PI<pwm>  PWM of every "drive until the side IR changes" leg, e.g. PI2800
+ *     PA<pwm>  AC (ultrasonic approach) cruise PWM, 2399..4199
+ *     PO<cm>   obstacle 2 length offset (default T2_LEN_OFFSET_CM)
+ *     PE<cm>   obstacle 2 TxV speed add  (default T2_LEN_SPEED_ADD_CM)
+ * Turns keep their own tuned speed (TURN_PWM_OUTER / TURN_SPEED_PCT_*).
+ * All existing commands (FW, LT, AC, IE, VS, ...) are unchanged.
+ * ===================================================================== */
+#define T2_DRIVE_PWM          3400  /* fixed-distance FW moves of the run (2399..4199). 15 Oct: 4000 -> 3400 */
+#define T2_IR_PWM             3000  /* every move that ends on an IR reading (ALONG1, ALONG2,
+                                       HOME): slower = less drift past the edge (2399..4199) */
+#define T2_ALONG2_PWM         3000  /* the move right after the 180 (2nd OLL) - hardcoded, NOT changed by PI */
+#define T2_AC_PWM             3400  /* 15 Oct: 4000 -> 3400. AC cruise PWM; AC still slows down in its last 30 cm */
+#define T2_PWM_MIN            2399  /* lowest value PW / PI / PA accept */
+
+/* Pre-move steering flick (200 ms) + settle (250 ms) that every FW normally does.
+ * 1 = skip them during the T2 run (saves ~0.45 s per FW), 0 = keep them.
+ * Normal FW/BW commands outside the run are NOT affected. */
+#define T2_SKIP_PRE_MOVE      1
+#define T2_PRE_MOVE_SETTLE_MS 30    /* small settle used instead when skipping */
+#define T2_GAP_MS             50    /* pause between two moves of the run */
+
+/* ---- route (cm / degrees) ---- */
+#define T2_AC1_CM             40    /* approach obstacle 1, then snap arrow 1 */
+#define T2_DODGE_DEG          45    /* arrow 1 L: LT45 FW RT45   R: RT45 FW LT45 */
+#define T2_RECENTER_DEG       45    /* arrow 1 L: RT45 LT45   R: LT45 RT45 */
+#define T2_AC2_CM             30    /* approach obstacle 2 and snap arrow 2 from here */
+/* After snap 2, AC to this distance (cm), per arrow pair <arrow1><arrow2>.
+ * Equal to T2_AC2_CM (or 0) = no extra AC, stay where the snap was taken. */
+#define T2_AC2_LL_CM          25    /* arrow 1 LEFT,  arrow 2 LEFT  */
+#define T2_AC2_LR_CM          25    /* arrow 1 LEFT,  arrow 2 RIGHT */
+#define T2_AC2_RL_CM          25    /* arrow 1 RIGHT, arrow 2 LEFT  */
+#define T2_AC2_RR_CM          25    /* arrow 1 RIGHT, arrow 2 RIGHT */
+#define T2_LOOP_TURN1_DEG     90    /* arrow 2 L: LT90   R: RT90 */
+#define T2_LOOP_TURN2_DEG     180   /* arrow 2 L: RT180  R: LT180 */
+#define T2_LOOP_TURN3_DEG     90    /* arrow 2 L: RT90   R: LT90 */
+#define T2_FINAL_DEG          45    /* final S-curve */
+#define T2_AC3_CM             20    /* final park distance */
+#define T2_AC3_PWM            3400  /* final park AC only - hardcoded, NOT changed by PA / --ac-pwm */
+
+/* ===== ALL HARDCODED FW DISTANCES OF THE RUN (cm) - EDIT HERE. 0 = skip that FW ===== */
+#define T2_DODGE_FW_CM        10    /* obstacle 1 dodge   (L: LT45 FW10 RT45) */
+#define T2_CLEAR1_FW_CM       8     /* clear obstacle 1 */
+#define T2_FW_AFTER_OLL1_CM   8     /* after the 1st OLL (along obstacle 2), before the 180 */
+#define T2_FW_AFTER_OLL2_CM   8     /* after the 2nd OLL (after the 180), before the exit 90 */
+#define T2_AFTER_LOOP_FW_CM   0     /* after the exit 90, before the trig shift (counts in the budget) */
+#define T2_FW_AFTER_PASS1_CM  0     /* after the IR has passed obstacle 1, before the S-curve */
+#define T2_FINAL_FW_CM        20    /* final S-curve FW (the FW before the last turn in) */
+/* ==================================================================================== */
+
+/* Final S-curve direction.
+ * 0 = arrow 2 L -> LT45 FW25 RT45,  R -> RT45 FW25 LT45
+ * 1 = arrow 2 L -> RT45 FW25 LT45,  R -> LT45 FW25 RT45   (turns back toward the centre line) */
+#define T2_FINAL_MIRROR       1
+/* After the first 90 (ALL arrow pairs): read the side IR once.
+ *   obstacle beside (<= 35 cm) -> 1st OLL until the IR reads garbage (= past the edge),
+ *                                 then FW T2_FW_AFTER_OLL1_CM, then the 180
+ *   already garbage            -> treated as past the edge:
+ *        arrows DIFFERENT : FW T2_FW_AFTER_OLL1_CM, then the 180
+ *        arrows SAME      : FW T2_FW_IF_PAST_SAME_CM (0 = straight into the 180) */
+#define T2_FW_IF_PAST_SAME_CM 0
+#define T2_PASS_OBS1          1     /* 1 = after HOME finds obstacle 1, drive on until the IR has
+                                       passed it before the final S-curve. 0 = turn at once */
+
+/* ---- side IR rules (IR2 = LEFT, IR1 = RIGHT, see IE_LEFT_IR / IE_RIGHT_IR) ----
+ * Arrow 2 LEFT  -> obstacle 2 is on the robot's RIGHT  -> right IR is watched.
+ * Arrow 2 RIGHT -> obstacle 2 is on the robot's LEFT   -> left IR is watched. */
+#define T2_IR_NEAR_MM         350   /* <= this = obstacle beside; above it or invalid = garbage */
+#define T2_IR_CONFIRM_N       2     /* samples in a row (20 ms apart) to confirm near / garbage */
+#define T2_IR_MAX_CM          150   /* safety cap: any "drive until IR" stops after this far */
+#define T2_AFTER180_NEED_NEAR 1     /* after the 180: 1 = must see the obstacle first, then wait
+                                       for garbage; 0 = stop at the first garbage reading */
+#define T2_SEEK_MAX_CM        40    /* ...but if it is never seen within this far, carry on */
+#define T2_WALL_GUARD_MM      150   /* front ultrasonic guard during IR free-runs (0 = off) */
+#define T2_FINAL_IR_SAME_SIDE 1     /* last "drive until IR within 35 cm": 1 = same IR as the
+                                       loop, 0 = the other side's IR */
+#define T2_IR_SAMPLE_MS       20    /* side IR sample period while driving (Sharp updates ~38 ms) */
+#define T2_HOME_NEAR_MM       200   /* HOME leg stops when the side IR reads <= this (10-20 cm window).
+                                       If obstacle 1 is only ever seen at 20-35 cm, it stops once the
+                                       IR has passed it (nearest possible) */
+
+/* ---- OBSTACLE LENGTH from the side IR (every "drive until IR" leg + OLL / OLR test) ----
+ * The near stretch = from the first IR read < T2_LEN_NEAR_MM to the first read
+ * after it that is >= T2_LEN_NEAR_MM / garbage (confirmed T2_IR_CONFIRM_N times).
+ * Measured three ways, all printed:
+ *   ENC   : encoder distance over the near stretch
+ *   TxV   : near time (ms, first near -> first far)        x T2_IR_SPEED_CMS
+ *   NxV   : number of near reads x T2_IR_SAMPLE_MS          x T2_IR_SPEED_CMS
+ * V_ENC (encoder distance / near time) is also printed - use it to set
+ * T2_IR_SPEED_CMS for your T2_IR_PWM. */
+#define T2_LEN_NEAR_MM        400   /* "< 40 cm" counts as seeing the obstacle */
+#define T2_IR_SPEED_CMS       25.0f /* robot speed at T2_IR_PWM, cm/s (measured 25 at PI2800,
+                                       14 Oct). Change at runtime with PV<cm/s>, e.g. PV25 */
+#define T2_LEN_SOURCE         0     /* length used for the trig: 0 ENC, 1 TxV, 2 NxV
+                                       (0 since 14 Oct: real speed varied 17-36 cm/s, TxV 15 cm short) */
+#define T2_LEN_SPEED_ADD_CM   0     /* added to TxV / NxV. 0 since 14 Oct: TxV read 50.5 for a
+                                       50 cm obstacle at PI3000. Runtime: PE<cm> (sent by the RPi) */
+#define T2_LEN_OFFSET_CM      8     /* part of obstacle 2 hidden by the 180. Runtime: PO<cm> */
+#define T2_LEN_OFS_ONLY_BESIDE 1    /* 1 = add the offset only when the IR was ALREADY beside
+                                       obstacle 2 right after the 180 (START:BESIDE) - that is the
+                                       only case where part of it was missed. 0 = add it every time */
+
+/* ---- LANE SHIFT on the way back (works for any obstacle 2 length) ----
+ * After the last loop turn + FW20 the robot is heading home, out to the side.
+ * Its sideways distance from the course centre line is worked out from the
+ * length of obstacle 2 measured on the far side (ALONG2, see OBSTACLE LENGTH):
+ *     obstacle 2 length L = near-stretch length (T2_LEN_SOURCE)
+ *                           + T2_OBS2_180_EAT_CM  if the IR already saw it after the 180
+ *     robot offset  X     = L/2 + (drift past the edge) + exit-turn forward reach
+ *                           - T2_IR_FWD_CM + T2_X_TRIM_CM
+ *     wanted offset X0    = T2_OBS1_HALF_W_CM + T2_OBS1_IR_GAP_CM + T2_IR_SIDE_CM
+ *                           (puts the side IR 15-30 cm from obstacle 1's side)
+ * It then shifts by (X - X0) with  45 in, FW d, 45 back,  where
+ *     shift = R_in(1-cos45) + R_back(1-cos45) + d*sin45   ->  d is solved for.
+ * After the shift the normal hardcode continues (drive until IR <= 35 cm, ...).
+ * Assumes obstacle 2 is centred on the course centre line. */
+#define T2_SHIFT_ENABLE       1
+#define T2_OBS2_180_EAT_CM    20.0f /* part of obstacle 2 the 180 turn "eats" */
+#define T2_IR_FWD_CM          4.5f  /* side IRs' distance ahead of the robot centre */
+#define T2_EXIT_RT90_FWD_CM   23.0f /* how far RT90 carries the robot forward (TURN_MODELS) */
+#define T2_EXIT_LT90_FWD_CM   19.0f /* how far LT90 carries the robot forward (TURN_MODELS) */
+#define T2_X_TRIM_CM          0.0f  /* + if the robot ends up further out than computed */
+#define T2_OBS1_HALF_W_CM     5.0f  /* half the width of obstacle 1 */
+#define T2_OBS1_IR_GAP_CM     15.0f /* wanted side-IR -> obstacle 1 edge distance (aim) */
+#define T2_IR_SIDE_CM         8.0f  /* robot centre -> side IR face, sideways */
+#define T2_GAP_MIN_CM         10.0f /* allowed side-IR -> obstacle 1 edge window ... */
+#define T2_GAP_MAX_CM         20.0f /* ... already inside it = no shift */
+#define T2_SHIFT_BUDGET_CM    50.0f /* forward travel allowed for the correction (exceeded only if
+                                       the window cannot be reached inside it, by as little as possible) */
+#define T2_SHIFT_DEG          45    /* turn angle used for the shift */
+/* MEASURED 45-degree turn displacement (cm), from where the turn starts, in the robot's
+ * own frame at the start: SIDE = sideways toward the turn, FWD = forward. (14 Oct) */
+#define T2_LT45_SIDE_CM       15.0f
+#define T2_LT45_FWD_CM        17.0f
+#define T2_RT45_SIDE_CM       17.0f
+#define T2_RT45_FWD_CM        21.0f
+#define T2_GAP_MARGIN_CM      2.0f  /* turns are not exact: when the aim (15) does not fit the
+                                       budget, aim this far INSIDE the window edge, not at it */
+#define T2_SHIFT_MAX_FW_CM    150   /* never drive more than this in the shift */
+
+/* ---- arrows ---- */
+#define T2_ARROW_LEFT         1
+#define T2_ARROW_RIGHT        2
+#define T2_DEFAULT_ARROW      T2_ARROW_LEFT  /* if the RPi does not answer in time */
+#define T2_SNAP_TIMEOUT_MS    6000
+
+/* ---- OLED sensor line (row 4: "L:xx R:xx U:xxx", cm, "--" = garbage) ---- */
+#define T2_SENS_IR_MS         100   /* IR refresh while idle / driving / turning */
+#define T2_SENS_US_MS         250   /* ultrasonic refresh while idle */
+
+static int32_t t2_drive_pwm = T2_DRIVE_PWM;
+static int32_t t2_ac_pwm    = T2_AC_PWM;
+static int32_t t2_ir_pwm    = T2_IR_PWM;
+static float   t2_ir_speed  = T2_IR_SPEED_CMS;   /* cm/s for TIME x SPEED, set with PV */
+static int32_t t2_len_add_cm = T2_LEN_SPEED_ADD_CM;  /* PE<cm> */
+static int32_t t2_len_ofs_cm = T2_LEN_OFFSET_CM;     /* PO<cm> */
+static volatile uint8_t  t2_active = 0;          /* 1 while the GO run is going */
+static volatile uint32_t t2_ir_raw1 = 0, t2_ir_raw2 = 0;   /* latest raw ADC, for the OLED */
+static volatile int32_t  t2_us_mm = -1;          /* latest ultrasonic mm, for the OLED */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -914,7 +1086,9 @@ static uint16_t flick_us = 1000;
 #define HOLD_K_HEAD      20      /* us of steering per degree of heading error */
 #define HOLD_K_LAT_X10   15      /* degrees of heading aim per cm off the line, x10 (1.5) */
 #define HOLD_MAX_US      80      /* largest steering correction */
-#define HOLD_START_MAX   5.0f    /* never take more than this much heading_err into one move */
+#define HOLD_START_MAX   15.0f   /* never take more than this much heading_err into one move
+                                    (14 Oct: 5 -> 15 so an 11 deg turn overshoot is fixed in the
+                                    next FW / turn, not spread over several moves) */
 static int32_t hold_en      = HOLD_ENABLE;
 static int32_t hold_k_head  = HOLD_K_HEAD;
 static int32_t hold_k_lat10 = HOLD_K_LAT_X10;
@@ -957,7 +1131,7 @@ void MotorB_Set(int32_t speed)
 
 
 #define CTRL_PERIOD_MS   10
-#define SPEED_CRUISE     2600
+#define SPEED_CRUISE     3400   /* typed FW / BW / AC (VS). 15 Oct: 2600 -> 4000 -> 3400 */
 #define SPEED_MIN        2300        /* was 900 - raise until it doesn't stall */
 #define DECEL_COUNTS     450
 #define KP_SYNC          4
@@ -1018,8 +1192,8 @@ void Motor_Brake(void);   /* defined further down, used to stop FW/BW */
  *     MOVED total travel (mm) including braking
  * The Pi (task2.py) uses EDGE / NEAR / MOVED exactly like its old FW3 + IR stepping,
  * but in one command, so there is no stop-start every 3 cm. */
-#define IE_LEFT_IR        1      /* IR on the LEFT side (1 or 2) - match IR_LEFT in rpi_client_task2.py */
-#define IE_RIGHT_IR       2      /* IR on the RIGHT side */
+#define IE_LEFT_IR        2      /* IR on the LEFT side (1 or 2) - match IR_LEFT in rpi_client_task2.py */
+#define IE_RIGHT_IR       1      /* IR on the RIGHT side */
 #define IE_NEAR_MAX_MM    400    /* reading <= this = obstacle beside me (task2 ir_near_max 40 cm) */
 #define IE_SPIKE_N        2      /* far samples in a row that confirm the edge (task2 spike_n) */
 #define IE_SAMPLE_MS      20     /* IR sample period; the Sharp sensor updates about every 38 ms */
@@ -1083,6 +1257,158 @@ static int IE_Check(void)
   return 0;
 }
 
+/* ===== TASK 2 30s: "drive until side IR changes" watcher =====
+ * Used through Drive_Distance (heading hold, ramp, brake all unchanged).
+ *   want_near = 0 : stop when the IR reads garbage (> T2_IR_NEAR_MM or invalid)
+ *                   T2_IR_CONFIRM_N times in a row. need_seen = 1 -> only after
+ *                   the obstacle was seen near at least once (gives up looking
+ *                   after T2_SEEK_MAX_CM).
+ *   want_near = 1 : stop when the IR reads <= T2_IR_NEAR_MM N times in a row.
+ * end: 0 MAX (hit the T2_IR_MAX_CM cap), 1 FOUND, 2 NEVER (never saw it), 3 WALL */
+static struct {
+  uint8_t  on, which, want_near, need_seen, seen, run, end;
+  uint32_t last_ir, last_us;
+  int32_t  last_mm, at_mm;
+  int32_t  seek_mm;                     /* need_seen: give up after this far, 0 = never */
+  /* obstacle length: the stretch where the IR reads < T2_LEN_NEAR_MM */
+  uint8_t  len_first, len_started_near, len_in, len_far, len_done;
+  uint16_t len_n;                       /* number of near reads */
+  int32_t  len_start_mm, len_end_mm;    /* encoder travel at first near / first far read */
+  uint32_t len_start_tick, len_end_tick;
+  int32_t  near_thr_mm;                 /* want_near: stop threshold (0 = T2_IR_NEAR_MM) */
+  uint8_t  pass_ok, wide_seen, far_run; /* want_near: stop after passing it if never in window */
+} t2w;
+static int32_t t2_next_thr_mm = 0;      /* set just before T2_DriveIr, consumed by it */
+static int32_t t2_next_pwm    = 0;      /* 0 = use PI */
+static uint8_t t2_next_pass   = 0;
+
+static int32_t T2_IR_Fast_mm(int which)        /* median of 3 quick reads, no delay */
+{
+  uint32_t ch = (which == 1) ? ADC_CHANNEL_11 : ADC_CHANNEL_12;
+  uint32_t v[3] = { IR_ReadRaw(ch), IR_ReadRaw(ch), IR_ReadRaw(ch) };
+  for (int i = 1; i < 3; i++) {
+    uint32_t k = v[i]; int j = i - 1;
+    while (j >= 0 && v[j] > k) { v[j + 1] = v[j]; j--; }
+    v[j + 1] = k;
+  }
+  return IR_RawTo_mm(v[1]);
+}
+
+/* Short ultrasonic ping for the wall guard: only waits as long as an echo from
+ * max_mm away would take (~1 ms for 150 mm) instead of up to 30 ms, so the side
+ * IR keeps being sampled. Returns mm, or -1 = nothing closer than max_mm. */
+static int32_t T2_US_Guard_mm(int32_t max_mm)
+{
+  const uint32_t cpu_us = 168;
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, GPIO_PIN_SET);
+  uint32_t t0 = DWT->CYCCNT;
+  while ((DWT->CYCCNT - t0) < 10 * cpu_us) {}
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, GPIO_PIN_RESET);
+  t0 = DWT->CYCCNT;
+  while (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14) == GPIO_PIN_RESET)
+    if ((DWT->CYCCNT - t0) > 3000U * cpu_us) return -1;      /* no echo start in 3 ms */
+  uint32_t start = DWT->CYCCNT;
+  uint32_t limit = (uint32_t)(max_mm * 58 / 10 + 200) * cpu_us;
+  while (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14) == GPIO_PIN_SET)
+    if ((DWT->CYCCNT - start) > limit) return -1;             /* further than max_mm */
+  return (int32_t)(((DWT->CYCCNT - start) / cpu_us) * 10 / 58);
+}
+
+static int T2_Check(void)
+{
+  if (!t2w.on) return 0;
+  uint32_t now = HAL_GetTick();
+  if (T2_WALL_GUARD_MM > 0 && now - t2w.last_us >= IE_US_PERIOD_MS) {
+    t2w.last_us = now;
+    int32_t d = T2_US_Guard_mm(T2_WALL_GUARD_MM);
+    if (d > 20 && d < T2_WALL_GUARD_MM) { t2w.end = 3; t2w.at_mm = IE_Travel_mm(); return 1; }
+    now = HAL_GetTick();
+  }
+  if (now - t2w.last_ir < T2_IR_SAMPLE_MS) return 0;
+  t2w.last_ir = now;
+
+  int32_t mm = T2_IR_Fast_mm(t2w.which);
+  t2w.last_mm = mm;
+  int near = (mm > 0 && mm <= T2_IR_NEAR_MM);
+  if (near) t2w.seen = 1;
+
+  /* obstacle length bookkeeping (does not affect when the robot stops) */
+  {
+    int lnear = (mm > 0 && mm < T2_LEN_NEAR_MM);
+    int32_t trav = IE_Travel_mm();
+    if (!t2w.len_first) { t2w.len_first = 1; t2w.len_started_near = (uint8_t)lnear; }
+    if (!t2w.len_done) {
+      if (lnear) {
+        if (!t2w.len_in) { t2w.len_in = 1; t2w.len_start_mm = trav; t2w.len_start_tick = now; }
+        t2w.len_n++;
+        t2w.len_far = 0;
+      } else if (t2w.len_in) {
+        if (t2w.len_far == 0) { t2w.len_end_mm = trav; t2w.len_end_tick = now; }
+        if (++t2w.len_far >= T2_IR_CONFIRM_N) t2w.len_done = 1;
+      }
+    }
+  }
+
+  if (t2w.want_near) {
+    int32_t thr = t2w.near_thr_mm > 0 ? t2w.near_thr_mm : T2_IR_NEAR_MM;
+    if (mm > 0 && mm <= thr) {
+      if (++t2w.run >= T2_IR_CONFIRM_N) { t2w.end = 1; t2w.at_mm = IE_Travel_mm(); return 1; }
+    } else t2w.run = 0;
+    if (t2w.pass_ok) {                  /* beside it (<= 35 cm) but never in the window, now past */
+      if (near) { t2w.wide_seen = 1; t2w.far_run = 0; }
+      else if (t2w.wide_seen && ++t2w.far_run >= T2_IR_CONFIRM_N) {
+        t2w.end = 4; t2w.at_mm = IE_Travel_mm(); return 1;
+      }
+    }
+  } else {
+    if (near) t2w.run = 0;
+    else if (t2w.seen || !t2w.need_seen) {
+      if (++t2w.run >= T2_IR_CONFIRM_N) { t2w.end = 1; t2w.at_mm = IE_Travel_mm(); return 1; }
+    }
+    if (t2w.need_seen && !t2w.seen && t2w.seek_mm > 0 && IE_Travel_mm() >= t2w.seek_mm) {
+      t2w.end = 2; t2w.at_mm = IE_Travel_mm(); return 1;
+    }
+  }
+  return 0;
+}
+
+/* ===== Encoder trip-meter (EZ = zero, EN = print) =====
+ * Follows the raw encoder counters on its own, so it never disturbs a move.
+ * Signed: forward = +, backward = -. Updated from T2_SensorTick (idle loop and
+ * every drive / turn loop) and on EZ / EN. */
+static int32_t  em_a = 0, em_b = 0;
+static uint32_t em_a_prev = 0;
+static uint16_t em_b_prev = 0;
+static uint8_t  em_init = 0;
+static void EncMeter_Update(void)
+{
+  uint32_t a = (uint32_t)__HAL_TIM_GET_COUNTER(&htim2);
+  uint16_t b = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
+  if (em_init) {
+    em_a += (int32_t)(a - em_a_prev);                 /* same signs as Enc_Update */
+    em_b += -(int32_t)(int16_t)(b - em_b_prev);
+  }
+  em_a_prev = a; em_b_prev = b; em_init = 1;
+}
+
+/* Keeps the OLED sensor line fresh. IR reads take microseconds; the ultrasonic
+ * (up to ~30 ms blocking) is only pinged when with_us = 1 (idle loop). */
+static void T2_SensorTick(int with_us)
+{
+  static uint32_t last_ir = 0, last_us = 0;
+  uint32_t now = HAL_GetTick();
+  EncMeter_Update();
+  if (now - last_ir >= T2_SENS_IR_MS) {
+    last_ir = now;
+    (void)IR_ReadRaw(ADC_CHANNEL_11);
+    (void)IR_ReadRaw(ADC_CHANNEL_12);
+  }
+  if (with_us && now - last_us >= T2_SENS_US_MS) {
+    last_us = now;
+    (void)US_Read_mm();
+  }
+}
+
 /* Drive straight for dist_cm. dir: +1 = FW, -1 = BW.
    Returns 0 = arrived, 1 = timeout, 2 = stalled. */
 int Drive_Distance(int32_t dist_cm, int dir)
@@ -1107,9 +1433,14 @@ int Drive_Distance(int32_t dist_cm, int dir)
   if (decel > (tgtA + tgtB) / 4) decel = (tgtA + tgtB) / 4;
   if (decel < 60) decel = 60;
 
-  if (flick_us) { Servo_SetPulse(flick_us); osDelay(200); }
-  Servo_Center();
-  osDelay(250);
+  {
+    /* TASK 2 30s: during the GO run the flick + 250 ms settle can be skipped
+       (T2_SKIP_PRE_MOVE). Outside the run this is exactly the original. */
+    int t2_fast = t2_active && T2_SKIP_PRE_MOVE;
+    if (flick_us && !t2_fast) { Servo_SetPulse(flick_us); osDelay(200); }
+    Servo_Center();
+    osDelay(t2_fast ? T2_PRE_MOVE_SETTLE_MS : 250);
+  }
   Enc_Reset();
 
   float yaw = 0.0f;                    /* heading change during this move, + = left */
@@ -1165,6 +1496,8 @@ int Drive_Distance(int32_t dist_cm, int dir)
     }
 
     if (IE_Check()) break;              /* IE command: edge found / wall guard */
+    if (T2_Check()) break;              /* TASK 2 30s: side IR near / garbage found */
+    T2_SensorTick(0);                   /* TASK 2 30s: OLED IR values */
     int32_t rem = ((tgtA - travA) + (tgtB - travB)) / 2;
     if (rem <= ARRIVE_TOL) break;
     if (elapsed >= MOVE_TIMEOUT_MS) { reason = 1; break; }
@@ -1259,6 +1592,8 @@ int Drive_Distance(int32_t dist_cm, int dir)
 #define TURN_LOOP_MS    20
 #define TURN_TIMEOUT_MS 5000
 #define TURN_PWM_OUTER  4100
+#define TURN_TOP_PWM    3800   /* 15 Oct: fastest turn speed (more than 60 deg left), was 4100.
+                                  The slower bands below scale from this. */
 /* Inner rear wheel PWM during a turn. Original: outer/1.71 (matched to
    steering geometry). Lower = tighter, but with tyre scrub.
    NOTE: changing this changes turn rate -> recalibrate STOP_OFFSET_*. */
@@ -1440,14 +1775,16 @@ int32_t US_Read_mm(void)
 
   t0 = DWT->CYCCNT;
   while (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14) == GPIO_PIN_RESET)
-    if ((DWT->CYCCNT - t0) > timeout) return -1;
+    if ((DWT->CYCCNT - t0) > timeout) { t2_us_mm = -1; return -1; }
 
   uint32_t start = DWT->CYCCNT;
   while (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14) == GPIO_PIN_SET)
-    if ((DWT->CYCCNT - start) > timeout) return -1;
+    if ((DWT->CYCCNT - start) > timeout) { t2_us_mm = -1; return -1; }
 
   uint32_t us = (DWT->CYCCNT - start) / cpu_us;
-  return (int32_t)(us * 10 / 58);
+  int32_t us_mm = (int32_t)(us * 10 / 58);
+  t2_us_mm = us_mm;                    /* TASK 2 30s: latest value for the OLED */
+  return us_mm;
 }
 
 /* median of 5 readings in mm, or -1 if too few valid */
@@ -1486,6 +1823,8 @@ static uint32_t IR_ReadRaw(uint32_t channel)
   }
   uint32_t v = HAL_ADC_GetValue(&hadc1);
   HAL_ADC_Stop(&hadc1);
+  if (channel == ADC_CHANNEL_11) t2_ir_raw1 = v;      /* TASK 2 30s: OLED */
+  else if (channel == ADC_CHANNEL_12) t2_ir_raw2 = v;
   return v;                                   /* 0..4095 */
 }
 
@@ -1623,7 +1962,7 @@ static int turn_single_wheel = TASK2_TURN_SINGLE_WHEEL;
 
 static int32_t Turn_SpeedForRemaining(float remaining, int ti)
 {
-  int32_t maximum = TURN_PWM_OUTER * TURN_PCT_NOW(ti) / 100;
+  int32_t maximum = TURN_TOP_PWM * TURN_PCT_NOW(ti) / 100;   /* 15 Oct: was TURN_PWM_OUTER (4100) */
   /* Our backup says approximately 2400 PWM is needed to start turning.
    * Keep its 2800 trim PWM as the starting floor, not friend's 1000/7199. */
   int32_t floor = TRIM_PWM_NOW;
@@ -1715,6 +2054,7 @@ float Car_Turn(float target_deg, int direction, int drive_dir)
     if (elapsed < TASK2_TURN_RAMP_MS)
       pwm = floor + (int32_t)((int64_t)(pwm - floor) * elapsed / TASK2_TURN_RAMP_MS);
     Turn_SetMotors(pwm, direction, drive_dir, ti);
+    T2_SensorTick(0);                  /* TASK 2 30s: OLED IR values (microseconds) */
     osDelay(10);
   }
 
@@ -1761,7 +2101,9 @@ float Car_Turn(float target_deg, int direction, int drive_dir)
   if (stop_requested) motion_status = MOTION_STOPPED;
   if (motion_status == MOTION_OK && fabsf(want - actual) > TASK2_TURN_TOL_DEG)
     motion_status = MOTION_ANGLE;
-  if (motion_status == MOTION_OK) {
+  if (motion_status == MOTION_OK || motion_status == MOTION_ANGLE) {
+    /* 14 Oct: also on ANGLE (turn > 2 deg off, e.g. LT180 -> 196): keep the error so the
+       next FW steers it out and the next turn aims to cancel it (was reset to 0 = lost) */
     heading_err += rot * (actual - target_deg);
     heading_err = fmaxf(-HEADING_ERR_MAX, fminf(heading_err, HEADING_ERR_MAX));
   } else {
@@ -1813,6 +2155,26 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 #define AC_SLOW_ZONE_MM     300
 #define AC_VALID_MAX_MM     4000
 #define AC_SETTLE_MS        150U
+#define AC_US_TRIES         5         /* no valid ultrasonic reading: try this many times ... */
+#define AC_US_TRY_MS        500U      /* ... this far apart (start to start), then TIMEOUT */
+
+/* Stationary reading with retries: up to AC_US_TRIES medians, AC_US_TRY_MS apart.
+ * Returns the first valid one (20 .. AC_VALID_MAX_MM), or -1 after the last try. */
+static int32_t AC_ReadRetry(void)
+{
+  int32_t d = -1;
+  for (int k = 0; k < AC_US_TRIES; k++) {
+    uint32_t t0 = HAL_GetTick();
+    d = US_Median_mm();
+    if (d >= 20 && d <= AC_VALID_MAX_MM) return d;
+    if (stop_requested) return -1;
+    if (k < AC_US_TRIES - 1) {
+      uint32_t used = HAL_GetTick() - t0;
+      if (used < AC_US_TRY_MS) osDelay(AC_US_TRY_MS - used);
+    }
+  }
+  return -1;
+}
 
 int Car_ApproachUltrasonic(int32_t target_mm, int32_t *final_mm)
 {
@@ -1833,12 +2195,12 @@ int Car_ApproachUltrasonic(int32_t target_mm, int32_t *final_mm)
   {
     /* Confirm the final spacing with the robot stopped. A transient running
      * echo can make us brake, but cannot falsely declare target reached. */
-    int32_t d = US_Median_mm();
+    int32_t d = AC_ReadRetry();        /* up to 5 tries, 0.5 s apart */
     *final_mm = d;
     gyro_tick = HAL_GetTick(); /* wheels are stationary during this median */
     if (stop_requested) { motion_status = MOTION_STOPPED; break; }
     if (HAL_GetTick() - started >= AC_TIMEOUT_MS) { motion_status = MOTION_TIMEOUT; break; }
-    if (d < 20 || d > AC_VALID_MAX_MM) { motion_status = MOTION_NOOBJ; break; }
+    if (d < 20 || d > AC_VALID_MAX_MM) { motion_status = MOTION_TIMEOUT; break; }  /* 5 tries failed */
     int32_t error = d - target_mm;
     if (labs(error) <= AC_TOL_MM) break;
     int dir = error > 0 ? 1 : -1;
@@ -1885,7 +2247,8 @@ int Car_ApproachUltrasonic(int32_t target_mm, int32_t *final_mm)
         ping_tick = HAL_GetTick();
         *final_mm = d;
         if (stop_requested) { motion_status = MOTION_STOPPED; break; }
-        if (d < 20 || d > AC_VALID_MAX_MM) { motion_status = MOTION_NOOBJ; break; }
+        if (d < 20 || d > AC_VALID_MAX_MM) break;   /* bad ping while moving: stop, then the
+                                                       stationary read retries (5 x 0.5 s) */
       }
       int32_t remaining = dir * (d - target_mm);
       if (remaining <= AC_TOL_MM) break; /* brake before any reversal */
@@ -1922,6 +2285,401 @@ int Car_ApproachUltrasonic(int32_t target_mm, int32_t *final_mm)
   ap_moved_cm = (int32_t)roundf(net_cm);
   heading_err = fmaxf(-HEADING_ERR_MAX, fminf(angle * GYRO_SCALE, HEADING_ERR_MAX));
   return motion_status;
+}
+
+/* =====================================================================
+ * TASK 2 30s: the hardcoded run (command "GO"). Settings: see T2_* in PV.
+ * Every step prints one "T2 <ms> ..." line so the RPi terminal shows the
+ * moves and the IR / US readings used for each decision.
+ * A move fails the run on STOP / IMU / STALL / TIMEOUT / NOOBJ / WALL;
+ * a turn that is only off by > 2 deg (ANGLE_ERROR) carries on.
+ * ===================================================================== */
+static uint32_t t2_start_tick = 0;
+static uint32_t T2_T(void) { return HAL_GetTick() - t2_start_tick; }
+
+static void T2_Say(const char *fmt, ...)
+{
+  char b[180];
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vsnprintf(b, sizeof(b), fmt, ap);
+  va_end(ap);
+  if (n <= 0) return;
+  if (n > (int)sizeof(b) - 1) n = (int)sizeof(b) - 1;
+  HAL_UART_Transmit(&huart3, (uint8_t *)b, (uint16_t)n, 100);
+}
+
+static int T2_Good(void)
+{
+  return !stop_requested && (motion_status == MOTION_OK || motion_status == MOTION_ANGLE);
+}
+
+static void T2_Gap(void) { if (T2_GAP_MS) osDelay(T2_GAP_MS); }
+
+static int T2_Fw(int32_t cm)
+{
+  if (cm <= 0) return 1;               /* 0 in the FW table = skip */
+  drive_cruise_pwm = t2_drive_pwm;
+  Drive_Distance(cm, +1);
+  T2_Say("T2 %lu FW%ld MOVED:%ldmm HE:%ld STATUS:%s\r\n", T2_T(), cm, IE_Travel_mm(),
+         (int32_t)(heading_err * 10), Motion_Status());
+  T2_Gap();
+  return T2_Good();
+}
+
+static int T2_Turn(int32_t deg, int direction)
+{
+  float got = Car_Turn_Square((float)deg, direction, +1);
+  T2_Say("T2 %lu %s%ld IMU:%ld STATUS:%s\r\n", T2_T(), direction == TURN_LEFT ? "LT" : "RT",
+         deg, (int32_t)(got * 10), Motion_Status());
+  T2_Gap();
+  return T2_Good();
+}
+
+static int T2_Ac(int32_t cm)
+{
+  int32_t d = -1;
+  drive_cruise_pwm = t2_ac_pwm;
+  Car_ApproachUltrasonic(cm * 10, &d);
+  T2_Say("T2 %lu AC%ld US:%ldmm MOVED:%ldcm STATUS:%s\r\n", T2_T(), cm, d, ap_moved_cm,
+         Motion_Status());
+  T2_Gap();
+  return !stop_requested && motion_status == MOTION_OK;
+}
+
+static const char *T2_IrName(int which) { return which == IE_LEFT_IR ? "LEFT" : "RIGHT"; }
+
+/* One stationary side-IR reading (median of 5), printed. */
+static int32_t T2_ReadIr(int which, const char *tag)
+{
+  int32_t mm = IR_Read_mm(which);
+  int near = (mm > 0 && mm <= T2_IR_NEAR_MM);
+  T2_Say("T2 %lu %s IR_%s:%ldmm US:%ldmm -> %s\r\n", T2_T(), tag, T2_IrName(which), mm,
+         t2_us_mm, near ? "OBSTACLE" : "GARBAGE");
+  return mm;
+}
+
+/* Results of the last IR leg's obstacle-length measurement (see T2_LEN_*). */
+static struct {
+  uint8_t  valid, started_near, open;   /* open = still beside it when the leg ended */
+  int32_t  enc_mm, txv_mm, nxv_mm, time_ms, v_enc_cms, end_mm;
+  uint16_t n;
+} t2len;
+
+static void T2_LenFinish(const char *tag)
+{
+  memset(&t2len, 0, sizeof(t2len));
+  if (!t2w.len_in) {
+    T2_Say("T2 %lu %s LEN: obstacle never read < %ldmm\r\n", T2_T(), tag, (int32_t)T2_LEN_NEAR_MM);
+    return;
+  }
+  if (t2w.len_far == 0) {               /* leg ended while still beside it */
+    t2w.len_end_mm = IE_Travel_mm(); t2w.len_end_tick = HAL_GetTick(); t2len.open = 1;
+  }
+  t2len.valid = 1;
+  t2len.started_near = t2w.len_started_near;
+  t2len.n = t2w.len_n;
+  t2len.end_mm = t2w.len_end_mm;
+  t2len.enc_mm = t2w.len_end_mm - t2w.len_start_mm;
+  t2len.time_ms = (int32_t)(t2w.len_end_tick - t2w.len_start_tick);
+  t2len.txv_mm = (int32_t)(t2_ir_speed * (float)t2len.time_ms / 100.0f);
+  t2len.nxv_mm = (int32_t)(t2_ir_speed * (float)t2len.n * (float)T2_IR_SAMPLE_MS / 100.0f);
+  t2len.v_enc_cms = t2len.time_ms > 0 ? t2len.enc_mm * 100 / t2len.time_ms : 0;
+  T2_Say("T2 %lu %s LEN ENC:%ldmm TxV:%ldmm NxV:%ldmm TIME:%ldms N:%u V_SET:%ldcm/s "
+         "V_ENC:%ldcm/s START:%s%s\r\n",
+         T2_T(), tag, t2len.enc_mm, t2len.txv_mm, t2len.nxv_mm, t2len.time_ms, t2len.n,
+         (int32_t)t2_ir_speed, t2len.v_enc_cms,
+         t2len.started_near ? "BESIDE" : "BEFORE", t2len.open ? " (STILL BESIDE AT END)" : "");
+}
+
+/* Length picked by T2_LEN_SOURCE, in mm. */
+static int32_t T2_LenPick_mm(void)
+{
+  return T2_LEN_SOURCE == 1 ? t2len.txv_mm : T2_LEN_SOURCE == 2 ? t2len.nxv_mm : t2len.enc_mm;
+}
+
+/* Drive forward until the side IR is near (want_near = 1) or garbage (0).
+ * seek_cm: with need_seen, give up looking after this far (0 = only the 150 cm cap). */
+static int T2_DriveIr(int which, int want_near, int need_seen, int32_t seek_cm, const char *tag)
+{
+  memset(&t2w, 0, sizeof(t2w));
+  t2w.which = (uint8_t)which;
+  t2w.want_near = (uint8_t)want_near;
+  t2w.need_seen = (uint8_t)need_seen;
+  t2w.seek_mm = seek_cm * 10;
+  t2w.last_mm = -1; t2w.at_mm = -1;
+  t2w.near_thr_mm = t2_next_thr_mm; t2w.pass_ok = t2_next_pass;
+  t2_next_thr_mm = 0; t2_next_pass = 0;
+  t2w.last_ir = t2w.last_us = HAL_GetTick() - 1000U;   /* sample at once */
+  t2w.on = 1;
+  drive_cruise_pwm = t2_next_pwm > 0 ? t2_next_pwm : t2_ir_pwm;   /* slower: less drift past the edge */
+  t2_next_pwm = 0;
+  Drive_Distance(T2_IR_MAX_CM, +1);
+  t2w.on = 0;
+  static const char *ends[] = { "MAX", "FOUND", "NEVER", "WALL", "PASSED" };
+  T2_Say("T2 %lu %s until IR_%s %s: END:%s AT:%ldmm LAST_IR:%ldmm MOVED:%ldmm STATUS:%s\r\n",
+         T2_T(), tag, T2_IrName(which), want_near ? "NEAR" : "GARBAGE", ends[t2w.end],
+         t2w.at_mm, t2w.last_mm, IE_Travel_mm(), Motion_Status());
+  if (!want_near) T2_LenFinish(tag);
+  T2_Gap();
+  if (t2w.end == 3) return 0;          /* something right in front: stop the run */
+  return T2_Good();
+}
+
+/* Ask the RPi for an arrow. Returns T2_ARROW_LEFT / T2_ARROW_RIGHT, 0 on STOP. */
+static int T2_WaitArrow(int n)
+{
+  char c[20];
+  while (rx_tail != rx_head) {         /* drop anything stale first */
+    taskENTER_CRITICAL();
+    memcpy(c, rx_queue[rx_tail], sizeof(c));
+    rx_tail = (uint8_t)((rx_tail + 1U) % RX_QUEUE_SLOTS);
+    taskEXIT_CRITICAL();
+    c[sizeof(c) - 1] = '\0';
+    T2_Say("T2 IGNORED [%s]\r\n", c);
+  }
+  T2_Say("T2 SNAP %d\r\n", n);
+  uint32_t t0 = HAL_GetTick();
+  while (HAL_GetTick() - t0 < T2_SNAP_TIMEOUT_MS) {
+    if (stop_requested) return 0;
+    if (rx_tail != rx_head) {
+      taskENTER_CRITICAL();
+      memcpy(c, rx_queue[rx_tail], sizeof(c));
+      rx_tail = (uint8_t)((rx_tail + 1U) % RX_QUEUE_SLOTS);
+      taskEXIT_CRITICAL();
+      c[sizeof(c) - 1] = '\0';
+      memcpy(aRxBuffer, c, sizeof(c)); /* shows on the OLED RX line */
+      if (c[0] == 'A' && (c[1] == 'L' || c[1] == 'R')) {
+        int arrow = (c[1] == 'L') ? T2_ARROW_LEFT : T2_ARROW_RIGHT;
+        T2_Say("T2 %lu ARROW%d %s CONF:%s%% (waited %lu ms)\r\n", T2_T(), n,
+               arrow == T2_ARROW_LEFT ? "LEFT" : "RIGHT", c + 2, HAL_GetTick() - t0);
+        return arrow;
+      }
+      T2_Say("T2 IGNORED [%s]\r\n", c);
+    }
+    osDelay(5);
+  }
+  T2_Say("T2 %lu ARROW%d NO REPLY -> DEFAULT %s\r\n", T2_T(), n,
+         T2_DEFAULT_ARROW == T2_ARROW_LEFT ? "LEFT" : "RIGHT");
+  return T2_DEFAULT_ARROW;
+}
+
+/* TRIG CORRECTION before obstacle 1 (see T2_GAP_* / T2_SHIFT_* settings).
+ * X      = robot centre -> obstacle 1 centre line, sideways (cm), robot is outside it
+ * toward = the turn that heads to the centre line
+ * pre_fw = forward already used inside the budget (T2_AFTER_LOOP_FW_CM)
+ * gap    = side IR face -> obstacle 1 edge = X - T2_OBS1_HALF_W_CM - T2_IR_SIDE_CM
+ * Move   = 45 in, FW d, 45 back:  sideways = in_side + (back_fwd - back_side) sin45 + d sin45
+ *                                 forward  = in_fwd  + (back_fwd + back_side) sin45 + d cos45
+ *          (measured T2_LT45_* / T2_RT45_* displacements)
+ * Choice: already in [MIN,MAX] -> nothing.  Else the plan in the window closest to the aim
+ * that fits the budget.  Else the in-window plan with the least forward (over budget by the
+ * least).  Else (window unreachable) the plan that ends nearest the window.
+ * Prints one PLAN line BEFORE moving. Returns 0 only on a failed move. */
+static int T2_LaneShift(float X, int toward, float pre_fw)
+{
+  const float s45 = 0.70711f;
+  float base = T2_OBS1_HALF_W_CM + T2_IR_SIDE_CM;
+  float gap0 = X - base;
+  int dir = (gap0 > T2_OBS1_IR_GAP_CM) ? toward : -toward;   /* in: closer to obstacle 1 */
+  float sg = (dir == toward) ? -1.0f : 1.0f;                  /* gap change per cm sideways */
+  /* in-turn as measured; back-turn starts at 45 deg, so rotate its (side, fwd) by 45 */
+  float in_side   = (dir  == TURN_LEFT) ? T2_LT45_SIDE_CM : T2_RT45_SIDE_CM;
+  float in_fwd    = (dir  == TURN_LEFT) ? T2_LT45_FWD_CM  : T2_RT45_FWD_CM;
+  float back_side = (-dir == TURN_LEFT) ? T2_LT45_SIDE_CM : T2_RT45_SIDE_CM;
+  float back_fwd  = (-dir == TURN_LEFT) ? T2_LT45_FWD_CM  : T2_RT45_FWD_CM;
+  float t_lat = in_side + (back_fwd - back_side) * s45;
+  float t_fwd = in_fwd  + (back_fwd + back_side) * s45;
+  float aim[2] = { T2_OBS1_IR_GAP_CM, (dir == toward) ? T2_GAP_MAX_CM - T2_GAP_MARGIN_CM
+                                                      : T2_GAP_MIN_CM + T2_GAP_MARGIN_CM };
+
+  /* candidates: 0 nothing, 1 turns only, 2 aim, 3 nearest window edge */
+  float g[4], f[4]; int32_t d[4];
+  g[0] = gap0; f[0] = pre_fw; d[0] = -1;
+  g[1] = gap0 + sg * t_lat; f[1] = pre_fw + t_fwd; d[1] = 0;
+  for (int k = 0; k < 2; k++) {
+    float need = fabsf(gap0 - aim[k]);
+    float dd = (need - t_lat) / s45;
+    int32_t di = dd > 0.0f ? (int32_t)(dd + 0.5f) : 0;
+    if (di > T2_SHIFT_MAX_FW_CM) di = T2_SHIFT_MAX_FW_CM;
+    d[2 + k] = di;
+    g[2 + k] = gap0 + sg * (t_lat + (float)di * s45);
+    f[2 + k] = pre_fw + t_fwd + (float)di * s45;
+  }
+  int best = -1;
+  const char *fit = "OK";
+  if (gap0 >= T2_GAP_MIN_CM && gap0 <= T2_GAP_MAX_CM) best = 0;
+  if (best < 0)                                    /* in window + inside budget, closest to aim */
+    for (int i = 1; i < 4; i++)
+      if (g[i] >= T2_GAP_MIN_CM - 0.05f && g[i] <= T2_GAP_MAX_CM + 0.05f &&
+          f[i] <= T2_SHIFT_BUDGET_CM + 0.05f &&
+          (best < 0 || fabsf(g[i] - aim[0]) < fabsf(g[best] - aim[0]) - 0.05f))
+        best = i;
+  if (best < 0) {                                  /* in window, least forward */
+    for (int i = 1; i < 4; i++)
+      if (g[i] >= T2_GAP_MIN_CM - 0.05f && g[i] <= T2_GAP_MAX_CM + 0.05f &&
+          (best < 0 || f[i] < f[best])) best = i;
+    if (best >= 0) fit = "OVER";
+  }
+  if (best < 0) {                                  /* window unreachable: nearest to it */
+    float bo = 1e9f;
+    for (int i = 0; i < 4; i++) {
+      float o = g[i] < T2_GAP_MIN_CM ? T2_GAP_MIN_CM - g[i] : g[i] - T2_GAP_MAX_CM;
+      if (o < bo - 0.05f || (fabsf(o - bo) <= 0.05f && f[i] < f[best])) { bo = o; best = i; }
+    }
+    fit = "OUTRANGE";
+  }
+
+  char cmd[40];
+  const char *tin  = (dir == TURN_LEFT) ? "LT" : "RT";
+  const char *tout = (dir == TURN_LEFT) ? "RT" : "LT";
+  if (d[best] < 0)       snprintf(cmd, sizeof(cmd), "NONE");
+  else if (d[best] == 0) snprintf(cmd, sizeof(cmd), "%s%d_%s%d", tin, T2_SHIFT_DEG, tout, T2_SHIFT_DEG);
+  else snprintf(cmd, sizeof(cmd), "%s%d_FW%ld_%s%d", tin, T2_SHIFT_DEG, d[best], tout, T2_SHIFT_DEG);
+  T2_Say("T2 %lu PLAN CMD:%s GAP_NOW_MM:%ld GAP_AFTER_MM:%ld FWD_MM:%ld BUDGET_MM:%ld FIT:%s X_MM:%ld\r\n",
+         T2_T(), cmd, (int32_t)(gap0 * 10.0f), (int32_t)(g[best] * 10.0f),
+         (int32_t)(f[best] * 10.0f), (int32_t)(T2_SHIFT_BUDGET_CM * 10.0f), fit, (int32_t)(X * 10.0f));
+
+  if (d[best] < 0) return 1;
+  if (!T2_Turn(T2_SHIFT_DEG, dir)) return 0;
+  if (d[best] > 0 && !T2_Fw(d[best])) return 0;
+  if (!T2_Turn(T2_SHIFT_DEG, -dir)) return 0;
+  return 1;
+}
+
+static void T2_Run(void)
+{
+  const char *fail = NULL;
+  int32_t saved_pwm = drive_cruise_pwm;
+  t2_active = 1;
+  t2_start_tick = HAL_GetTick();
+  heading_err = 0.0f;
+  T2_Say("T2 START PW:%ld PI:%ld PA:%ld PV:%ld PE:%ld PO:%ld SKIP_PRE:%d\r\n", t2_drive_pwm,
+         t2_ir_pwm, t2_ac_pwm, (int32_t)t2_ir_speed, t2_len_add_cm, t2_len_ofs_cm, T2_SKIP_PRE_MOVE);
+
+  do {
+    /* ---------- obstacle 1 ---------- */
+    if (!T2_Ac(T2_AC1_CM)) { fail = "AC1"; break; }
+    int a1 = T2_WaitArrow(1);
+    if (!a1) { fail = "SNAP1"; break; }
+    int s1 = (a1 == T2_ARROW_LEFT) ? TURN_LEFT : TURN_RIGHT;   /* -s1 = the other way */
+
+    /* L: LT45 FW5 RT45      R: RT45 FW5 LT45 */
+    if (!T2_Turn(T2_DODGE_DEG, s1))  { fail = "DODGE1_TURN1"; break; }
+    if (!T2_Fw(T2_DODGE_FW_CM))      { fail = "DODGE1_FW"; break; }
+    if (!T2_Turn(T2_DODGE_DEG, -s1)) { fail = "DODGE1_TURN2"; break; }
+    /* FW10 to clear obstacle 1 (no IR here) */
+    if (!T2_Fw(T2_CLEAR1_FW_CM))     { fail = "CLEAR1_FW"; break; }
+    /* back to the centre line.  L: RT45 LT45     R: LT45 RT45 */
+    if (!T2_Turn(T2_RECENTER_DEG, -s1)) { fail = "RECENTER_TURN1"; break; }
+    if (!T2_Turn(T2_RECENTER_DEG, s1))  { fail = "RECENTER_TURN2"; break; }
+
+    /* ---------- obstacle 2 ---------- */
+    if (!T2_Ac(T2_AC2_CM)) { fail = "AC2"; break; }
+    int a2 = T2_WaitArrow(2);
+    if (!a2) { fail = "SNAP2"; break; }
+    int s2 = (a2 == T2_ARROW_LEFT) ? TURN_LEFT : TURN_RIGHT;
+    /* AC in for this arrow pair (arrow 2 is only known after the snap at T2_AC2_CM) */
+    {
+      int32_t ac2 = (a1 == T2_ARROW_LEFT) ? (a2 == T2_ARROW_LEFT ? T2_AC2_LL_CM : T2_AC2_LR_CM)
+                                          : (a2 == T2_ARROW_LEFT ? T2_AC2_RL_CM : T2_AC2_RR_CM);
+      if (ac2 > 0 && ac2 != T2_AC2_CM && !T2_Ac(ac2)) { fail = "AC2_PAIR"; break; }
+    }
+    int side_ir  = (a2 == T2_ARROW_LEFT) ? IE_RIGHT_IR : IE_LEFT_IR;  /* obstacle side */
+    int other_ir = (side_ir == IE_RIGHT_IR) ? IE_LEFT_IR : IE_RIGHT_IR;
+
+    /* L: LT90     R: RT90 */
+    if (!T2_Turn(T2_LOOP_TURN1_DEG, s2)) { fail = "LOOP_TURN90"; break; }
+    {
+      int32_t mm = T2_ReadIr(side_ir, "AFTER_TURN90");
+      if (mm > 0 && mm <= T2_IR_NEAR_MM) {
+        /* 1st OLL: forward until the IR spikes to garbage (end passed) */
+        if (!T2_DriveIr(side_ir, 0, 1, T2_SEEK_MAX_CM, "ALONG1")) { fail = "ALONG1"; break; }
+        if (!T2_Fw(T2_FW_AFTER_OLL1_CM)) { fail = "FW_AFTER_OLL1"; break; }
+      } else if (a1 == a2) {
+        T2_Say("T2 %lu ALONG1 first read garbage (same side) -> past the edge, 180 next\r\n", T2_T());
+        if (!T2_Fw(T2_FW_IF_PAST_SAME_CM)) { fail = "FW_IF_PAST_SAME"; break; }
+      } else {
+        T2_Say("T2 %lu ALONG1 first read garbage -> OLL done\r\n", T2_T());
+        if (!T2_Fw(T2_FW_AFTER_OLL1_CM)) { fail = "FW_AFTER_OLL1"; break; }
+      }
+    }
+
+    /* L: RT180    R: LT180 */
+    if (!T2_Turn(T2_LOOP_TURN2_DEG, -s2)) { fail = "LOOP_TURN180"; break; }
+    (void)T2_ReadIr(side_ir, "AFTER_TURN180");
+    /* 2nd OLL: forward until the side IR gives garbage (far end of obstacle 2 passed) */
+    t2_next_pwm = T2_ALONG2_PWM;       /* own PWM for the move after the 180 */
+    if (!T2_DriveIr(side_ir, 0, T2_AFTER180_NEED_NEAR, T2_SEEK_MAX_CM, "ALONG2")) {
+      fail = "ALONG2"; break;
+    }
+    /* obstacle 2 length = TxV (T2_LEN_SOURCE) + speed add + offset (every time) */
+    int along2_ok = (t2w.end == 1) && t2len.valid && !t2len.open;
+    int32_t pick_mm = T2_LenPick_mm();
+    int32_t add_mm  = (T2_LEN_SOURCE != 0) ? t2_len_add_cm * 10 : 0;
+    int32_t ofs_mm  = (!T2_LEN_OFS_ONLY_BESIDE || t2len.started_near) ? t2_len_ofs_cm * 10 : 0;
+    float obs2_len = (float)(pick_mm + add_mm + ofs_mm) / 10.0f;
+    if (along2_ok)
+      T2_Say("T2 %lu OBS2 SRC:%s RAW_MM:%ld ADD_MM:%ld OFS_MM:%ld LEN_MM:%ld ENC_MM:%ld START:%s\r\n",
+             T2_T(), T2_LEN_SOURCE == 1 ? "TxV" : T2_LEN_SOURCE == 2 ? "NxV" : "ENC",
+             pick_mm, add_mm, ofs_mm, pick_mm + add_mm + ofs_mm, t2len.enc_mm,
+             t2len.started_near ? "BESIDE" : "BEFORE");
+    else
+      T2_Say("T2 %lu OBS2 NOT_MEASURED END:%d VALID:%d OPEN:%d\r\n", T2_T(), t2w.end,
+             t2len.valid, t2len.open);
+    float drift_cm = (float)(IE_Travel_mm() - t2len.end_mm) / 10.0f;   /* past the edge */
+    if (!T2_Fw(T2_FW_AFTER_OLL2_CM)) { fail = "FW_AFTER_OLL2"; break; }
+    float fw2_cm = T2_FW_AFTER_OLL2_CM > 0 ? (float)IE_Travel_mm() / 10.0f : 0.0f;
+
+    /* L: RT90     R: LT90 (exit, heading home) */
+    if (!T2_Turn(T2_LOOP_TURN3_DEG, -s2)) { fail = "LOOP_TURN90_2"; break; }
+    if (!T2_Fw(T2_AFTER_LOOP_FW_CM))      { fail = "AFTER_LOOP_FW"; break; }
+
+    /* trig correction so the side IR passes obstacle 1 at 10-20 cm */
+    if (T2_SHIFT_ENABLE) {
+      if (along2_ok) {
+        float exit_fwd = (-s2 == TURN_RIGHT) ? T2_EXIT_RT90_FWD_CM : T2_EXIT_LT90_FWD_CM;
+        float X = obs2_len * 0.5f + drift_cm + fw2_cm + exit_fwd - T2_IR_FWD_CM + T2_X_TRIM_CM;
+        if (!T2_LaneShift(X, -s2, (float)T2_AFTER_LOOP_FW_CM)) { fail = "SHIFT"; break; }
+      } else {
+        T2_Say("T2 %lu PLAN CMD:NONE REASON:NO_EDGE\r\n", T2_T());
+      }
+    }
+
+    /* HOME: forward until the side IR reads <= 20 cm (or has passed obstacle 1) */
+    int final_ir = T2_FINAL_IR_SAME_SIDE ? side_ir : other_ir;
+    t2_next_thr_mm = T2_HOME_NEAR_MM; t2_next_pass = 1;
+    if (!T2_DriveIr(final_ir, 1, 0, 0, "HOME")) { fail = "HOME"; break; }
+    /* still beside obstacle 1 -> keep going until the IR has passed it, THEN turn in
+       (turning in while beside it drives the robot into obstacle 1) */
+    if (T2_PASS_OBS1 && t2w.end == 1) {
+      if (!T2_DriveIr(final_ir, 0, 0, 0, "PASS1")) { fail = "PASS1"; break; }
+    }
+    if (!T2_Fw(T2_FW_AFTER_PASS1_CM)) { fail = "FW_AFTER_PASS1"; break; }
+
+    /* final S-curve.  As specified: L: LT45 FW25 RT45    R: RT45 FW25 LT45 */
+    int f = T2_FINAL_MIRROR ? -s2 : s2;
+    if (!T2_Turn(T2_FINAL_DEG, f))   { fail = "FINAL_TURN1"; break; }
+    if (!T2_Fw(T2_FINAL_FW_CM))      { fail = "FINAL_FW"; break; }
+    if (!T2_Turn(T2_FINAL_DEG, -f))  { fail = "FINAL_TURN2"; break; }
+    {                                  /* final park: own hardcoded PWM */
+      int32_t keep = t2_ac_pwm;
+      t2_ac_pwm = T2_AC3_PWM;
+      int ok = T2_Ac(T2_AC3_CM);
+      t2_ac_pwm = keep;
+      if (!ok) { fail = "AC3"; break; }
+    }
+  } while (0);
+
+  t2w.on = 0;
+  t2_active = 0;
+  drive_cruise_pwm = saved_pwm;        /* normal FW/BW/AC speed restored */
+  MotorA_Set(0); MotorB_Set(0); Servo_Center();
+  if (fail)
+    T2_Say("T2 END FAIL AT:%s STATUS:%s TIME:%lu ms\r\n", fail,
+           stop_requested ? "STOPPED" : Motion_Status(), T2_T());
+  else
+    T2_Say("T2 END OK TIME:%lu ms\r\n", T2_T());
 }
 
 /* USER CODE END 4 */
@@ -1993,7 +2751,9 @@ void StartDefaultTask(void *argument)
       if (p[0] == 'I' && p[1] == 'E') argument_at = 4;   /* IE<L|R><N|A><cm> */
       if (p[0] == 'N' || p[0] == 'C' || (p[0] == 'V' && p[1] != 'S')) argument_at = 3;
       int noarg = !strcmp(p,"US") || !strcmp(p,"IR") || !strcmp(p,"BI") ||
-                  !strcmp(p,"KQ") || !strcmp(p,"RA") || !strcmp(p,"GY") || !strcmp(p,"YW");
+                  !strcmp(p,"KQ") || !strcmp(p,"RA") || !strcmp(p,"GY") || !strcmp(p,"YW") ||
+                  !strcmp(p,"GO") || !strcmp(p,"EZ") || !strcmp(p,"EN") ||  /* TASK 2 30s */
+                  !strcmp(p,"OLL") || !strcmp(p,"OLR") || !strcmp(p,"OTL") || !strcmp(p,"OTR");
       int sensor_prefix = !strncmp(p,"US",2) || !strncmp(p,"IR",2) ||
                           !strncmp(p,"BI",2) || !strncmp(p,"RA",2) ||
                           !strncmp(p,"GY",2) || !strncmp(p,"YW",2) || !strncmp(p,"KQ",2);
@@ -2271,6 +3031,110 @@ void StartDefaultTask(void *argument)
         int n = sprintf(tx, "%s VS:%ld\r\n", ok ? "SPEED" : "ERR", drive_cruise_pwm);
         HAL_UART_Transmit(&huart3, (uint8_t *)tx, n, 100);
       }
+      /* ---- TASK 2 30s ----
+         GO       : run the whole hardcoded Task 2 route (T2_Run)
+         PW<pwm>  : fixed-distance FW PWM for the run (2399..4199)
+         PI<pwm>  : "drive until IR" PWM for the run (2399..4199)
+         PA<pwm>  : AC cruise PWM for the run (2399..4199) */
+      else if (p[0] == 'G' && p[1] == 'O' && p[2] == '\0') {
+        T2_Run();
+      }
+      /* OLL / OLR : obstacle-length test with the LEFT / RIGHT IR.
+         Drives forward at the IR PWM (PI) until it has seen an obstacle (< 40 cm)
+         and passed its end (or 150 cm), then prints its length 3 ways. */
+      else if (p[0] == 'O' && p[1] == 'L' && (p[2] == 'L' || p[2] == 'R') && p[3] == '\0') {
+        int32_t saved = drive_cruise_pwm;
+        t2_start_tick = HAL_GetTick();
+        T2_DriveIr(p[2] == 'L' ? IE_LEFT_IR : IE_RIGHT_IR, 0, 1, 0, p);
+        drive_cruise_pwm = saved;
+        int n = sprintf(tx, "DONE %s ENC_MM:%ld TXV_MM:%ld NXV_MM:%ld TIME_MS:%ld N:%u "
+                        "V_ENC:%ld START:%s STATUS:%s\r\n", p,
+                        t2len.valid ? t2len.enc_mm : -1L, t2len.valid ? t2len.txv_mm : -1L,
+                        t2len.valid ? t2len.nxv_mm : -1L, t2len.time_ms, t2len.n,
+                        t2len.v_enc_cms, t2len.started_near ? "BESIDE" : "BEFORE",
+                        Motion_Status());
+        HAL_UART_Transmit(&huart3, (uint8_t *)tx, n, 100);
+      }
+      /* OTR / OTL : test ONLY the far-side part of the obstacle-2 loop, exactly as GO does it.
+           OTR = arrow 2 RIGHT path: LT180, then drive along with the LEFT IR
+           OTL = arrow 2 LEFT  path: RT180, then drive along with the RIGHT IR
+         Drives at the IR PWM (PI) until the IR has passed the obstacle's end, then
+         prints the length by ENCODER and by TIME x SPEED (and READS x 20 ms x SPEED),
+         plus the obstacle 2 length the lane shift would use (+20 cm if already beside). */
+      else if (p[0] == 'O' && p[1] == 'T' && (p[2] == 'L' || p[2] == 'R') && p[3] == '\0') {
+        int arrow_left = (p[2] == 'L');
+        int s2 = arrow_left ? TURN_LEFT : TURN_RIGHT;
+        int side_ir = arrow_left ? IE_RIGHT_IR : IE_LEFT_IR;
+        int32_t saved = drive_cruise_pwm;
+        memset(&t2len, 0, sizeof(t2len));
+        memset(&t2w, 0, sizeof(t2w));
+        t2_active = 1;                       /* same pre-move behaviour as the GO run */
+        t2_start_tick = HAL_GetTick();
+        heading_err = 0.0f;
+        int ok = T2_Turn(T2_LOOP_TURN2_DEG, -s2);
+        if (ok) {
+          (void)T2_ReadIr(side_ir, "AFTER_TURN180");
+          ok = T2_DriveIr(side_ir, 0, T2_AFTER180_NEED_NEAR, T2_SEEK_MAX_CM, "ALONG2");
+        }
+        t2_active = 0;
+        drive_cruise_pwm = saved;
+        MotorA_Set(0); MotorB_Set(0); Servo_Center();
+        int32_t add = (t2len.valid && t2len.started_near) ? (int32_t)(T2_OBS2_180_EAT_CM * 10.0f) : 0;
+        static const char *ends2[] = { "MAX", "FOUND", "NEVER", "WALL" };
+        int n = sprintf(tx, "DONE %s END:%s ENC_MM:%ld TXV_MM:%ld NXV_MM:%ld TIME_MS:%ld N:%u "
+                        "V_ENC:%ld START:%s OBS2_ENC_MM:%ld OBS2_TXV_MM:%ld STATUS:%s\r\n",
+                        p, ends2[t2w.end],
+                        t2len.valid ? t2len.enc_mm : -1L, t2len.valid ? t2len.txv_mm : -1L,
+                        t2len.valid ? t2len.nxv_mm : -1L, t2len.time_ms, t2len.n,
+                        t2len.v_enc_cms, t2len.started_near ? "BESIDE" : "BEFORE",
+                        t2len.valid ? t2len.enc_mm + add : -1L,
+                        t2len.valid ? t2len.txv_mm + add : -1L,
+                        stop_requested ? "STOPPED" : Motion_Status());
+        HAL_UART_Transmit(&huart3, (uint8_t *)tx, n, 100);
+      }
+      /* EZ : zero the encoder trip-meter.   EN : print it.
+         Reply: ENC A:<counts> B:<counts> A_MM:<mm> B_MM:<mm> AVG_MM:<mm>
+         (+ = forward, - = backward, mm from CPC_A_x100 / CPC_B_x100) */
+      else if (p[0] == 'E' && (p[1] == 'Z' || p[1] == 'N') && p[2] == '\0') {
+        EncMeter_Update();
+        if (p[1] == 'Z') { em_a = 0; em_b = 0; }
+        int32_t amm = (int32_t)((int64_t)em_a * 1000 / CPC_A_x100);
+        int32_t bmm = (int32_t)((int64_t)em_b * 1000 / CPC_B_x100);
+        int n = sprintf(tx, "ENC A:%ld B:%ld A_MM:%ld B_MM:%ld AVG_MM:%ld\r\n",
+                        em_a, em_b, amm, bmm, (amm + bmm) / 2);
+        HAL_UART_Transmit(&huart3, (uint8_t *)tx, n, 100);
+      }
+      /* PV<cm/s> : robot speed at the IR PWM, used by TIME x SPEED (e.g. PV25) */
+      else if (p[0] == 'P' && p[1] == 'V') {
+        int32_t v = atoi(p + 2);
+        int ok = v >= 1 && v <= 300;
+        if (ok) t2_ir_speed = (float)v;
+        int n = sprintf(tx, "%s PV:%ld cm/s (PI:%ld)\r\n", ok ? "T2PWM" : "ERR T2PWM",
+                        (int32_t)t2_ir_speed, t2_ir_pwm);
+        HAL_UART_Transmit(&huart3, (uint8_t *)tx, n, 100);
+      }
+      /* PO<cm> : obstacle 2 length offset (added every time)
+         PE<cm> : obstacle 2 TxV speed add */
+      else if (p[0] == 'P' && (p[1] == 'O' || p[1] == 'E')) {
+        int32_t v = atoi(p + 2);
+        int ok = v >= -50 && v <= 100;
+        if (ok) { if (p[1] == 'O') t2_len_ofs_cm = v; else t2_len_add_cm = v; }
+        int n = sprintf(tx, "%s PO:%ld PE:%ld\r\n", ok ? "T2PWM" : "ERR T2PWM",
+                        t2_len_ofs_cm, t2_len_add_cm);
+        HAL_UART_Transmit(&huart3, (uint8_t *)tx, n, 100);
+      }
+      else if (p[0] == 'P' && (p[1] == 'W' || p[1] == 'A' || p[1] == 'I')) {
+        int32_t v = atoi(p + 2);
+        int ok = v >= T2_PWM_MIN && v <= PWM_MAX;
+        if (ok) {
+          if (p[1] == 'W') t2_drive_pwm = v;
+          else if (p[1] == 'A') t2_ac_pwm = v;
+          else t2_ir_pwm = v;
+        }
+        int n = sprintf(tx, "%s PW:%ld PI:%ld PA:%ld\r\n", ok ? "T2PWM" : "ERR T2PWM",
+                        t2_drive_pwm, t2_ir_pwm, t2_ac_pwm);
+        HAL_UART_Transmit(&huart3, (uint8_t *)tx, n, 100);
+      }
 #if STEER_TEST
       /* SU<us> : hold servo at a raw pulse for 3 s, then re-centre.
                   Used to find where the steering linkage stops. */
@@ -2422,6 +3286,7 @@ void StartDefaultTask(void *argument)
         HAL_UART_Transmit(&huart3, (uint8_t *)tx, n, 100);
       }
     }
+    if (rx_tail == rx_head) T2_SensorTick(1);   /* TASK 2 30s: OLED IR + US while idle */
     osDelay(20);
   }
   /* USER CODE END 5 */
@@ -2453,6 +3318,20 @@ void show(void *argument)
 
 	snprintf((char*)hello, sizeof(hello), "RX:%-19.19s", aRxBuffer);
     OLED_ShowString(0, 32, (u8*)hello);
+
+    /* TASK 2 30s: side IRs + ultrasonic in cm ("--" = garbage / no echo).
+       Values come from the latest reads by the control task (no ADC clash). */
+    {
+      char l[8], r[8], u[8];
+      int32_t lm = IR_RawTo_mm(t2_ir_raw2);   /* IR2 = LEFT  */
+      int32_t rm = IR_RawTo_mm(t2_ir_raw1);   /* IR1 = RIGHT */
+      int32_t um = t2_us_mm;
+      if (lm > 0) snprintf(l, sizeof(l), "%ld", lm / 10); else strcpy(l, "--");
+      if (rm > 0) snprintf(r, sizeof(r), "%ld", rm / 10); else strcpy(r, "--");
+      if (um > 0) snprintf(u, sizeof(u), "%ld", um / 10); else strcpy(u, "--");
+      snprintf((char*)hello, sizeof(hello), "L:%-3.3sR:%-3.3sU:%-4.4s", l, r, u);
+      OLED_ShowString(0, 48, (u8*)hello);
+    }
 
 	OLED_Refresh_Gram();
     osDelay(100);
