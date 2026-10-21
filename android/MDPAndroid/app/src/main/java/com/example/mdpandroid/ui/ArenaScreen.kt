@@ -55,6 +55,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
@@ -64,6 +65,8 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
@@ -92,6 +95,9 @@ import com.example.mdpandroid.ui.theme.ObstacleBlue
 import com.example.mdpandroid.ui.theme.RobotGreen
 import com.example.mdpandroid.ui.theme.SuccessContainer
 import com.example.mdpandroid.ui.theme.TargetAmber
+import com.example.mdpandroid.ui.theme.GameNavy
+import com.example.mdpandroid.ui.theme.GameCyan
+import com.example.mdpandroid.ui.theme.ImageFaceYellow
 
 @Composable
 internal fun ArenaScreen(
@@ -393,7 +399,7 @@ private fun ArenaStatusSidebar(
                 .fillMaxWidth()
                 .padding(horizontal = 8.dp, vertical = 12.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(SpaceSm)
+            verticalArrangement = Arrangement.spacedBy(SpaceXs)
         ) {
             ArenaMetric("Position", "(${state.robot.x}, ${state.robot.y})", modifier = Modifier.fillMaxWidth())
             ArenaMetric("Heading", state.robot.direction.code, modifier = Modifier.fillMaxWidth())
@@ -406,11 +412,12 @@ private fun ArenaStatusSidebar(
                 verticalArrangement = Arrangement.spacedBy(SpaceXs)
             ) {
                 ArenaLegendItem(ObstacleBlue, "Obstacle")
-                ArenaLegendItem(TargetAmber, "Target")
+                ArenaLegendItem(TargetAmber, "Image ID")
                 ArenaLegendItem(RobotGreen, "Robot")
+                ImageFaceLegend()
             }
             HorizontalDivider()
-            ConnectionPill(connected = state.connected)
+            ConnectionPill(connected = state.connected, demoMode = state.demoMode)
             SendArenaButton(
                 enabled = state.canSendArena,
                 onSendArena = onSendArena,
@@ -432,6 +439,17 @@ internal fun ArenaLegendItem(color: Color, label: String) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         Surface(color = color, shape = RoundedCornerShape(50), modifier = Modifier.size(8.dp)) {}
         Text(label, style = MaterialTheme.typography.labelSmall)
+    }
+}
+
+@Composable
+private fun ImageFaceLegend() {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        Canvas(Modifier.size(10.dp, 6.dp)) {
+            drawRect(ImageFaceYellow)
+            drawRect(GameNavy, style = Stroke(1.dp.toPx()))
+        }
+        Text("Image face", style = MaterialTheme.typography.labelSmall)
     }
 }
 
@@ -611,13 +629,11 @@ internal fun ObstacleDetails(obstacle: Obstacle, modifier: Modifier = Modifier) 
     // A Box + contentAlignment, not a Row's horizontalArrangement group-alignment — guarantees
     // centering regardless of how much width the caller's weight()/fixed-width modifier grants.
     Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-        Row(horizontalArrangement = Arrangement.spacedBy(SpaceXs), verticalAlignment = Alignment.Bottom) {
-            Text("Obstacle ${obstacle.id}", fontWeight = FontWeight.SemiBold)
-            Text(
-                "(${obstacle.x}, ${obstacle.y})",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("Obstacle ${obstacle.id} · (${obstacle.x}, ${obstacle.y})", fontWeight = FontWeight.SemiBold)
+            Text("Image face: ${obstacle.targetFace?.displayName() ?: "not set"}",
+                style = MaterialTheme.typography.bodySmall, color = ImageFaceYellow)
+            obstacle.targetId?.let { Text("Image ID: $it", style = MaterialTheme.typography.bodySmall) }
         }
     }
 }
@@ -629,6 +645,11 @@ internal fun FaceChoices(obstacle: Obstacle, onSetObstacleFace: (String, Face) -
             FilterChip(
                 selected = obstacle.targetFace == face,
                 onClick = { onSetObstacleFace(obstacle.id, face) },
+                modifier = Modifier.semantics { contentDescription = "Image face: ${face.displayName()}" },
+                colors = FilterChipDefaults.filterChipColors(
+                    selectedContainerColor = MaterialTheme.colorScheme.primary,
+                    selectedLabelColor = MaterialTheme.colorScheme.onPrimary
+                ),
                 label = { Text(face.code, fontWeight = FontWeight.Bold) }
             )
         }
@@ -636,16 +657,16 @@ internal fun FaceChoices(obstacle: Obstacle, onSetObstacleFace: (String, Face) -
 }
 
 @Composable
-internal fun ConnectionPill(connected: Boolean) {
+internal fun ConnectionPill(connected: Boolean, demoMode: Boolean = false) {
     Surface(
         shape = RoundedCornerShape(50),
-        color = if (connected) SuccessContainer else MaterialTheme.colorScheme.errorContainer
+        color = if (connected || demoMode) SuccessContainer else MaterialTheme.colorScheme.errorContainer
     ) {
         Text(
-            if (connected) "LIVE" else "NO LINK",
+            if (demoMode) "DEMO" else if (connected) "LIVE" else "NO LINK",
             modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
             style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
-            color = if (connected) MissionTeal else MaterialTheme.colorScheme.error,
+            color = if (connected || demoMode) MissionTeal else MaterialTheme.colorScheme.error,
             fontWeight = FontWeight.Bold
         )
     }
@@ -682,7 +703,7 @@ internal fun ArenaMetric(label: String, value: String, modifier: Modifier = Modi
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center
         )
-        Text(value, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+        Text(value, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
     }
 }
 
@@ -705,10 +726,11 @@ internal fun ArenaLegendRow(
             ) {
                 Row(modifier = Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(SpaceSm)) {
                     ArenaLegendItem(ObstacleBlue, "Obstacle")
-                    ArenaLegendItem(TargetAmber, "Target")
+                    ArenaLegendItem(TargetAmber, "Image ID")
                     ArenaLegendItem(RobotGreen, "Robot")
+                    ImageFaceLegend()
                 }
-                ConnectionPill(connected = state.connected)
+                ConnectionPill(connected = state.connected, demoMode = state.demoMode)
                 Column(modifier = Modifier.width(160.dp), verticalArrangement = Arrangement.spacedBy(SpaceXs)) {
                     SendArenaButton(enabled = state.canSendArena, onSendArena = onSendArena, label = "Send arena", modifier = Modifier.fillMaxWidth())
                     TaskStartButton(state, RobotCommand.BEGIN_EXPLORE, onCommand, Modifier.fillMaxWidth())
@@ -719,11 +741,12 @@ internal fun ArenaLegendRow(
             Column(verticalArrangement = Arrangement.spacedBy(SpaceXs)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(SpaceSm)) {
                     ArenaLegendItem(ObstacleBlue, "Obstacle")
-                    ArenaLegendItem(TargetAmber, "Target")
+                    ArenaLegendItem(TargetAmber, "Image ID")
                     ArenaLegendItem(RobotGreen, "Robot")
+                    ImageFaceLegend()
                 }
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(SpaceSm)) {
-                    ConnectionPill(connected = state.connected)
+                    ConnectionPill(connected = state.connected, demoMode = state.demoMode)
                     SendArenaButton(enabled = state.canSendArena, onSendArena = onSendArena, label = "Send arena")
                 }
                 TaskStartButton(state, RobotCommand.BEGIN_EXPLORE, onCommand)
@@ -905,6 +928,13 @@ internal fun RobotStartCard(
 
 private enum class DragKind { OBSTACLE, ROBOT }
 
+private fun Face.displayName(): String = when (this) {
+    Face.N -> "North (N)"
+    Face.S -> "South (S)"
+    Face.E -> "East (E)"
+    Face.W -> "West (W)"
+}
+
 @Composable
 internal fun ArenaCanvas(
     state: AppState,
@@ -930,8 +960,8 @@ internal fun ArenaCanvas(
     val latestOnSelectRobot by rememberUpdatedState(onSelectRobot)
     Canvas(
         modifier = modifier
-            .background(Color(0xFFEAF4F5), RoundedCornerShape(16.dp))
-            .border(1.dp, Color(0xFFA9BEC9), RoundedCornerShape(16.dp))
+            .background(Color(0xFF111A43), RoundedCornerShape(16.dp))
+            .border(1.dp, Color(0xFF7381A3), RoundedCornerShape(16.dp))
             .pointerInput(Unit) {
                 awaitEachGesture {
                     try {
@@ -1003,8 +1033,8 @@ internal fun ArenaCanvas(
         val cellWidth = size.width / MAP_COLUMNS
         val cellHeight = size.height / MAP_ROWS
 
-        for (x in 0..MAP_COLUMNS) drawLine(Color(0xFFD5E3E8), Offset(x.toFloat() * cellWidth, 0f), Offset(x.toFloat() * cellWidth, size.height), 1f)
-        for (y in 0..MAP_ROWS) drawLine(Color(0xFFD5E3E8), Offset(0f, y.toFloat() * cellHeight), Offset(size.width, y.toFloat() * cellHeight), 1f)
+        for (x in 0..MAP_COLUMNS) drawLine(Color(0xFF34426B), Offset(x.toFloat() * cellWidth, 0f), Offset(x.toFloat() * cellWidth, size.height), 1f)
+        for (y in 0..MAP_ROWS) drawLine(Color(0xFF34426B), Offset(0f, y.toFloat() * cellHeight), Offset(size.width, y.toFloat() * cellHeight), 1f)
 
         state.obstacles.forEach { obstacle ->
             if (dragKind == DragKind.OBSTACLE && dragObstacleId == obstacle.id) return@forEach
@@ -1012,26 +1042,9 @@ internal fun ArenaCanvas(
             val top = (MAP_ROWS - 1 - obstacle.y) * cellHeight + 2f
             val obstacleWidth = cellWidth - 4f
             val obstacleHeight = cellHeight - 4f
-            val right = left + obstacleWidth
-            val bottom = top + obstacleHeight
             val fill = if (obstacle.targetId != null) TargetAmber else ObstacleBlue
-            drawRect(fill, Offset(left, top), Size(obstacleWidth, obstacleHeight))
-            drawRect(Color.White, Offset(left, top), Size(obstacleWidth, obstacleHeight), style = Stroke(2f))
-            obstacle.targetFace?.let { face ->
-                val faceColor = MissionError
-                when (face) {
-                    Face.N -> drawLine(faceColor, Offset(left, top), Offset(right, top), 5f)
-                    Face.S -> drawLine(faceColor, Offset(left, bottom), Offset(right, bottom), 5f)
-                    Face.W -> drawLine(faceColor, Offset(left, top), Offset(left, bottom), 5f)
-                    Face.E -> drawLine(faceColor, Offset(right, top), Offset(right, bottom), 5f)
-                }
-            }
-            drawCenteredText(
-                text = obstacle.targetId ?: obstacle.id.removePrefix("B"),
-                center = Offset(left + obstacleWidth / 2, top + obstacleHeight / 2),
-                color = Color.White,
-                textSize = cellWidth.coerceAtMost(cellHeight) * if (obstacle.targetId != null) 0.42f else 0.38f
-            )
+            drawArenaObstacle(obstacle, Offset(left, top), Size(obstacleWidth, obstacleHeight), fill,
+                selected = state.selectedObstacleId == obstacle.id)
         }
 
         if (dragKind != DragKind.ROBOT) {
@@ -1050,7 +1063,16 @@ internal fun ArenaCanvas(
                 Face.W -> Offset(-robotRadius * 0.85f, 0f)
                 Face.E -> Offset(robotRadius * 0.85f, 0f)
             }
-            drawLine(Color.White, robotCenter, robotCenter + direction, 4f, cap = StrokeCap.Round)
+            drawLine(GameNavy, robotCenter, robotCenter + direction, 4f, cap = StrokeCap.Round)
+            val tip = robotCenter + direction
+            val perpendicular = Offset(-direction.y, direction.x) * .20f
+            drawPath(Path().apply {
+                moveTo(tip.x, tip.y)
+                val a = robotCenter + direction * .55f + perpendicular
+                val b = robotCenter + direction * .55f - perpendicular
+                lineTo(a.x, a.y); lineTo(b.x, b.y); close()
+            }, GameNavy)
+            drawCenteredText("005", robotCenter + Offset(0f, robotRadius * .32f), GameNavy, robotRadius * .43f)
         }
 
         val liveOffset = dragOffset
@@ -1061,17 +1083,9 @@ internal fun ArenaCanvas(
                     val point = gridPoint(liveOffset, size.width, size.height)
                     val outOfBounds = point.x !in 0 until MAP_COLUMNS || point.y !in 0 until MAP_ROWS
                     val fill = if (outOfBounds) MissionError else if (obstacle.targetId != null) TargetAmber else ObstacleBlue
-                    drawRect(
-                        fill.copy(alpha = 0.85f),
+                    drawArenaObstacle(obstacle,
                         Offset(liveOffset.x - cellWidth / 2 + 2f, liveOffset.y - cellHeight / 2 + 2f),
-                        Size(cellWidth - 4f, cellHeight - 4f)
-                    )
-                    drawCenteredText(
-                        obstacle.targetId ?: obstacle.id.removePrefix("B"),
-                        liveOffset,
-                        Color.White,
-                        cellWidth.coerceAtMost(cellHeight) * 0.38f
-                    )
+                        Size(cellWidth - 4f, cellHeight - 4f), fill.copy(alpha = .85f), selected = true)
                 }
             }
             DragKind.ROBOT -> if (liveOffset != null) {
@@ -1088,6 +1102,39 @@ internal fun ArenaCanvas(
             }
             null -> Unit
         }
+    }
+}
+
+/** Keep IDs and the image-facing edge visible during both editing and drag previews. */
+private fun DrawScope.drawArenaObstacle(
+    obstacle: Obstacle, origin: Offset, extent: Size, fill: Color, selected: Boolean
+) {
+    val unit = minOf(extent.width, extent.height)
+    drawRect(fill, origin, extent)
+    drawRect(if (selected) GameCyan else Color.White, origin, extent,
+        style = Stroke(if (selected) 2.dp.toPx() else 1.dp.toPx()))
+    obstacle.targetFace?.let { face ->
+        val horizontal = face == Face.N || face == Face.S
+        val thickness = unit * .19f
+        val markerSize = if (horizontal) Size(extent.width * .76f, thickness)
+                         else Size(thickness, extent.height * .76f)
+        val inset = unit * .035f
+        val markerOrigin = origin + when (face) {
+            Face.N -> Offset(extent.width * .12f, inset)
+            Face.S -> Offset(extent.width * .12f, extent.height - inset - thickness)
+            Face.W -> Offset(inset, extent.height * .12f)
+            Face.E -> Offset(extent.width - inset - thickness, extent.height * .12f)
+        }
+        drawRect(ImageFaceYellow, markerOrigin, markerSize)
+        drawRect(GameNavy, markerOrigin, markerSize, style = Stroke(unit * .035f))
+    }
+    val center = origin + Offset(extent.width / 2, extent.height / 2)
+    // The B prefix and I prefix distinguish obstacle identity from a received image ID.
+    if (obstacle.targetId == null) {
+        drawCenteredText(obstacle.id, center, GameNavy, unit * .36f)
+    } else {
+        drawCenteredText(obstacle.id, center - Offset(0f, unit * .12f), GameNavy, unit * .24f)
+        drawCenteredText("I${obstacle.targetId}", center + Offset(0f, unit * .14f), GameNavy, unit * .27f)
     }
 }
 

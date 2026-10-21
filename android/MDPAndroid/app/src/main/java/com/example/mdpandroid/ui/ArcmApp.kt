@@ -1,6 +1,8 @@
 package com.example.mdpandroid.ui
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -74,10 +76,13 @@ fun ARCMApp(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             Surface(color = MaterialTheme.colorScheme.primaryContainer) {
+              BoxWithConstraints {
+                val compactBrand = maxWidth < 700.dp
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    GameBrand(compact = compactBrand)
                     PrimaryTabRow(
                         selectedTabIndex = selectedTab,
                         modifier = Modifier.weight(1f),
@@ -90,12 +95,14 @@ fun ARCMApp(
                                 onClick = { selectedTab = index },
                                 selectedContentColor = MaterialTheme.colorScheme.primary,
                                 unselectedContentColor = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.72f),
-                                text = { Text(tab.title) }
+                                text = { Text(tab.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                    fontSize = if (compactBrand) 13.sp else 16.sp) }
                             )
                         }
                     }
                     ConnectionIndicator(connected = state.connected, demoMode = demoMode)
                 }
+              }
             }
         }
     ) { padding ->
@@ -105,9 +112,12 @@ fun ARCMApp(
         val onSendArena: () -> Unit = {
             controller.sendArenaSnapshot()
         }
-        when (AppTab.entries[selectedTab]) {
+        Box(Modifier.fillMaxSize()) {
+          GameTexture(Modifier.matchParentSize())
+          when (AppTab.entries[selectedTab]) {
             AppTab.OVERVIEW -> ScreenColumn(padding) {
-                MissionOverviewCard(state = state, demoMode = demoMode)
+                BoxWithConstraints(Modifier.fillMaxWidth()) {
+                    val connection = @Composable {
                 ConnectionCard(
                     state = state,
                     demoMode = demoMode,
@@ -121,6 +131,19 @@ fun ARCMApp(
                     onDisconnect = controller::disconnect,
                     onSelectDevice = { showDevices = true }
                 )
+                    }
+                    if (maxWidth >= 840.dp) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(SectionGap)) {
+                            Column(Modifier.weight(1.6f)) { MissionOverviewCard(state, demoMode) }
+                            Column(Modifier.weight(1f)) { connection() }
+                        }
+                    } else {
+                        Column(verticalArrangement = Arrangement.spacedBy(SectionGap)) {
+                            MissionOverviewCard(state, demoMode)
+                            connection()
+                        }
+                    }
+                }
             }
             AppTab.ARENA -> ArenaScreen(
                 padding = padding,
@@ -142,18 +165,30 @@ fun ARCMApp(
                 onClearObstacleSelection = controller::clearObstacleSelection
             )
             AppTab.CONTROLS -> ScreenColumn(padding) {
-                ControlAvailabilityCard(enabled = state.canDrive, demoMode = demoMode, taskActive = state.taskActive)
-                ControlCard(enabled = state.canDrive, onCommand = onCommand)
-                AssessmentCommandCard(
-                    state = state,
-                    onCommand = onCommand,
-                    onSendArena = onSendArena,
-                    onCancelTask = controller::cancelTask
-                )
+                BoxWithConstraints(Modifier.fillMaxWidth()) {
+                    if (maxWidth >= 700.dp) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(SectionGap)) {
+                            Column(Modifier.weight(.8f), verticalArrangement = Arrangement.spacedBy(SectionGap)) {
+                                ControlAvailabilityCard(enabled = state.canDrive, demoMode = demoMode, taskActive = state.taskActive)
+                                ControlCard(enabled = state.canDrive, onCommand = onCommand, taskActive = state.taskRun != null)
+                            }
+                            Column(Modifier.weight(1.2f)) {
+                                AssessmentCommandCard(state, onCommand, onSendArena, controller::cancelTask)
+                            }
+                        }
+                    } else {
+                        Column(verticalArrangement = Arrangement.spacedBy(SectionGap)) {
+                            ControlAvailabilityCard(enabled = state.canDrive, demoMode = demoMode, taskActive = state.taskActive)
+                            ControlCard(enabled = state.canDrive, onCommand = onCommand, taskActive = state.taskRun != null)
+                            AssessmentCommandCard(state, onCommand, onSendArena, controller::cancelTask)
+                        }
+                    }
+                }
                 RobotActivityCard(
                     history = controller.logHistory
                 )
             }
+          }
         }
     }
 
@@ -189,7 +224,7 @@ internal fun ConnectionIndicator(connected: Boolean, demoMode: Boolean) {
     Surface(
         shape = RoundedCornerShape(50),
         color = if (active) SuccessContainer else MaterialTheme.colorScheme.surface,
-        modifier = Modifier.padding(end = 16.dp)
+        modifier = Modifier.padding(end = 8.dp)
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),

@@ -16,11 +16,11 @@ class TaskReliabilityRegressionTest {
         assertNoStart(controller, RobotCommand.BEGIN_EXPLORE)
     }
 
-    @Test fun taskCannotStartWithMissingFaces() = withController { controller ->
+    @Test fun exploreCannotStartWithMissingFaces() = withController { controller ->
         controller.addObstacle(GridPoint(5, 5))
         controller.sendArenaSnapshot()
-        controller.moveRobot(RobotCommand.BEGIN_FASTEST)
-        assertNoStart(controller, RobotCommand.BEGIN_FASTEST)
+        controller.moveRobot(RobotCommand.BEGIN_EXPLORE)
+        assertNoStart(controller, RobotCommand.BEGIN_EXPLORE)
     }
 
     @Test fun arenaSendRejectsMissingFacesAndListsTheAffectedObstacles() = withController { controller ->

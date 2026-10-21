@@ -71,7 +71,8 @@ class AssessmentButtonsTest {
         val fastest = compose.onNodeWithText("Task 2\nFastest path")
         val send = compose.onNodeWithText("Send current arena to robot")
         explore.assertIsNotEnabled()
-        fastest.assertIsNotEnabled()
+        // appV1: Task 2 is independent of the obstacle-map send gate.
+        fastest.assertIsEnabled()
         send.performClick()
         compose.runOnIdle { assertEquals("[(1, 5, 5, \"S\")]", controller.state.sentArena) }
         fastest.assertIsEnabled().performClick()

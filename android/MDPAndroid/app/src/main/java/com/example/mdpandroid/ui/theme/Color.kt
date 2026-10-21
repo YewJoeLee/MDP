@@ -2,18 +2,31 @@ package com.example.mdpandroid.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-val MissionNavy = Color(0xFF17324D)
-val MissionTeal = Color(0xFF007C6A)
-val MissionInk = Color(0xFF17212B)
-val AppBackground = Color(0xFFF6F8FB)
-val QuietPanel = Color(0xFFE7F1F4)
-val OutlineBlueGrey = Color(0xFFB8C7D1)
-val SuccessContainer = Color(0xFFD8F3EA)
-val ObstacleBlue = Color(0xFF39779A)
-val TargetAmber = Color(0xFFC88719)
-val RobotGreen = Color(0xFF11996D)
-val MissionError = Color(0xFFC83B33)
+// Palette from the team's "MDP Part 2" deck, theme1.xml.
+val GameNavy = Color(0xFF070E36)
+val GamePink = Color(0xFFFCB0B6)
+val GamePinkEdge = Color(0xFFDE8C93)
+val GameMint = Color(0xFFC1F1A1)
+val GameCyan = Color(0xFF47BCD5)
+val GameTeal = Color(0xFF04797C)
+val GameOrange = Color(0xFFFF9122)
 
-val DarkSurface = Color(0xFF14212E)
-val DarkBackground = Color(0xFF0E1722)
-val DarkPanel = Color(0xFF243746)
+// Retain shared semantic names so controls and map interactions share one theme.
+val MissionNavy = Color(0xFF111A43)
+val MissionTeal = GameMint
+val MissionInk = Color(0xFFF7F4F0)
+val AppBackground = GameNavy
+val QuietPanel = Color(0xFF1B254F)
+val OutlineBlueGrey = Color(0xFF7381A3)
+val SuccessContainer = Color(0xFF193B3E)
+val ObstacleBlue = GamePink
+val TargetAmber = GameMint
+val RobotGreen = GameCyan
+val MissionError = Color(0xFFFF929D)
+
+val DarkSurface = Color(0xFF111A43)
+val DarkBackground = GameNavy
+val DarkPanel = QuietPanel
+
+// Bright image-facing marker, outlined in navy against pastel obstacle fills.
+val ImageFaceYellow = Color(0xFFFFE16B)

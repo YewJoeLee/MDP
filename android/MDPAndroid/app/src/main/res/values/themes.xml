@@ -1,5 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <style name="Theme.MDPAndroid" parent="android:Theme.Material.Light.NoActionBar" />
+    <style name="Theme.MDPAndroid" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#070E36</item>
+        <item name="android:statusBarColor">#070E36</item>
+        <item name="android:navigationBarColor">#070E36</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:colorAccent">#FCB0B6</item>
+    </style>
 </resources>

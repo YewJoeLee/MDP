@@ -2,6 +2,7 @@ package com.example.mdpandroid.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -40,6 +41,10 @@ import com.example.mdpandroid.canSendArena
 import com.example.mdpandroid.description
 import com.example.mdpandroid.taskStartIssue
 import com.example.mdpandroid.ui.theme.MissionTeal
+import com.example.mdpandroid.ui.theme.GameDisplayFont
+import com.example.mdpandroid.ui.theme.GamePink
+import com.example.mdpandroid.ui.theme.GameCyan
+import com.example.mdpandroid.ui.theme.GameMint
 
 @Composable
 internal fun ControlAvailabilityCard(enabled: Boolean, demoMode: Boolean, taskActive: Boolean = false) {
@@ -55,7 +60,7 @@ internal fun ControlAvailabilityCard(enabled: Boolean, demoMode: Boolean, taskAc
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(Modifier.weight(1f)) {
-                Text(if (enabled) "Controls are armed" else "Controls are unavailable", fontWeight = FontWeight.Bold)
+                Text(if (enabled) "Manual controls ready" else "Manual controls unavailable", fontWeight = FontWeight.Bold)
                 Text(
                     if (taskActive) "Manual driving is unavailable while a task is active."
                     else if (demoMode) "Commands will be recorded locally in demo mode."
@@ -75,7 +80,7 @@ internal fun ControlAvailabilityCard(enabled: Boolean, demoMode: Boolean, taskAc
 }
 
 @Composable
-internal fun ControlCard(enabled: Boolean, onCommand: (RobotCommand) -> Unit) {
+internal fun ControlCard(enabled: Boolean, onCommand: (RobotCommand) -> Unit, taskActive: Boolean = false) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(24.dp),
@@ -87,10 +92,10 @@ internal fun ControlCard(enabled: Boolean, onCommand: (RobotCommand) -> Unit) {
                     Text("Manual drive", fontWeight = FontWeight.Bold)
                     Text("Use for positioning and controlled testing", style = MaterialTheme.typography.bodySmall)
                 }
-                Text(if (enabled) "READY" else "OFFLINE", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                Text(if (taskActive) "TASK ACTIVE" else if (enabled) "READY" else "OFFLINE", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
             }
             Text(
-                "The map follows sent drive commands and is corrected by ROBOT updates.",
+                "Position is estimated from commands and corrected when the robot reports its position.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -185,22 +190,47 @@ internal fun AssessmentCommandCard(
     onSendArena: () -> Unit,
     onCancelTask: () -> Unit
 ) {
-    val issue = state.taskStartIssue()
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
     ) {
         Column(Modifier.padding(CardInset), verticalArrangement = Arrangement.spacedBy(SectionGap)) {
-            Text("Assessment runs", fontWeight = FontWeight.Bold)
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("TASK CONTROL", modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.titleMedium)
+                GameSymbols()
+            }
+            Text("Assessment runs", style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text(
-                state.taskRun?.description() ?: issue ?: "Arena ready. You can start a task.",
+                state.taskRun?.description() ?: "Check each task’s readiness before starting.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                TaskStartButton(state, RobotCommand.BEGIN_EXPLORE, onCommand, Modifier.weight(1f))
-                TaskStartButton(state, RobotCommand.BEGIN_FASTEST, onCommand, Modifier.weight(1f))
+                Column(Modifier.weight(1f).border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(14.dp)).padding(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("TASK 1", color = GamePink, fontFamily = GameDisplayFont, fontSize = 12.sp)
+                    Text("Image recognition", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
+                    Text("Navigate · stop · identify", style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(state.taskStartIssue(RobotCommand.BEGIN_EXPLORE) ?: "Ready to begin",
+                        modifier = Modifier.heightIn(min = 42.dp), style = MaterialTheme.typography.labelMedium,
+                        color = if (state.taskStartIssue(RobotCommand.BEGIN_EXPLORE) == null) GameMint else MaterialTheme.colorScheme.onSurfaceVariant)
+                    TaskStartButton(state, RobotCommand.BEGIN_EXPLORE, onCommand, Modifier.fillMaxWidth())
+                }
+                Column(Modifier.weight(1f).border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(14.dp)).padding(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("TASK 2", color = GameCyan, fontFamily = GameDisplayFont, fontSize = 12.sp)
+                    Text("Fastest path", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
+                    Text("Read arrows · return", style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(state.taskStartIssue(RobotCommand.BEGIN_FASTEST) ?: "Ready to begin",
+                        modifier = Modifier.heightIn(min = 42.dp), style = MaterialTheme.typography.labelMedium,
+                        color = if (state.taskStartIssue(RobotCommand.BEGIN_FASTEST) == null) GameMint else MaterialTheme.colorScheme.onSurfaceVariant)
+                    TaskStartButton(state, RobotCommand.BEGIN_FASTEST, onCommand, Modifier.fillMaxWidth())
+                }
             }
             state.taskRun?.let { run ->
                 // Filled error colours so the escape hatch stands out against the navy card.
@@ -233,7 +263,11 @@ internal fun TaskStartButton(
         onClick = { onCommand(command) },
         enabled = state.taskStartIssue(command) == null,
         modifier = modifier.heightIn(min = 48.dp),
-        contentPadding = contentPadding
+        contentPadding = contentPadding,
+        colors = ButtonDefaults.buttonColors(
+            disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+            disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     ) {
         Text(if (command == RobotCommand.BEGIN_FASTEST) "Task 2\nFastest path" else "Task 1\nExplore", textAlign = TextAlign.Center)
     }
@@ -256,7 +290,9 @@ internal fun SendArenaButton(
         contentPadding = contentPadding,
         colors = ButtonDefaults.buttonColors(
             containerColor = MaterialTheme.colorScheme.secondary,
-            contentColor = MaterialTheme.colorScheme.onSecondary
+            contentColor = MaterialTheme.colorScheme.onSecondary,
+            disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+            disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant
         )
     ) {
         Text(label, textAlign = TextAlign.Center)

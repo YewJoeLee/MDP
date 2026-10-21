@@ -52,12 +52,11 @@ class AssessmentTransmissionTest {
         main { receive(controller, "taskComplete\n"); assertNull(controller.state.taskRun) }
     }
 
-    @Test fun missingFacesAndPendingArenaWritesCannotStartEitherTask() = withTransport { controller, output ->
+    @Test fun missingFacesBlockExploreAndPendingArenaWritesBlockBothTasks() = withTransport { controller, output ->
         main {
             controller.addObstacle(GridPoint(5, 5))
             controller.sendArenaSnapshot()
             controller.moveRobot(RobotCommand.BEGIN_EXPLORE)
-            controller.moveRobot(RobotCommand.BEGIN_FASTEST)
             assertNull(controller.state.taskRun)
         }
         assertTrue(output.records().isEmpty())
@@ -74,6 +73,18 @@ class AssessmentTransmissionTest {
         } finally { output.release!!.countDown() }
         await { !controller.state.arenaSendPending }
         assertEquals(listOf("[(1, 5, 5, \"S\")]"), output.records())
+    }
+
+    @Test fun fastestStartsWithoutArenaAndEmitsExactPayload() = withTransport { controller, output ->
+        main { controller.moveRobot(RobotCommand.BEGIN_FASTEST) }
+        await { controller.state.taskRun?.phase == TaskPhase.RUNNING }
+        assertEquals(listOf("beginFastest"), output.records())
+        main {
+            assertTrue(controller.state.obstacles.isEmpty())
+            assertNull(controller.state.sentArena)
+            receive(controller, "taskComplete\n")
+            assertNull(controller.state.taskRun)
+        }
     }
 
     @Test fun failedTaskWriteKeepsDeliveryUncertainAndRequiresReconnection() = withTransport { controller, output ->

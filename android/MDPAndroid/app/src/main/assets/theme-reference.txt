@@ -1,0 +1,13 @@
+MDP Group 5 — The Games
+
+Visual reference supplied by the team: MDP Part 2.pptx, based on the Slidesgo
+"The Calamari Game Minitheme" template. The navy background texture is taken
+from the team's supplied deck; the Android staircase and symbol components
+are responsive native UI adaptations. The source presentation is unchanged.
+
+Deck palette: #070E36, #FCB0B6, #DE8C93, #C1F1A1, #47BCD5, #04797C, #FF9122.
+
+Audiowide and Anaheim font files are bundled from the official Google Fonts
+repository. Their SIL Open Font License texts are in assets/font-licenses/.
+https://github.com/google/fonts/tree/main/ofl/audiowide
+https://github.com/google/fonts/tree/main/ofl/anaheim
